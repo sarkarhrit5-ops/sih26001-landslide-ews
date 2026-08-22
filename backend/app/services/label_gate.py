@@ -1,10 +1,19 @@
 import pandas as pd
 import numpy as np
 
-def check_label_quality(csv_path: str, bounds: dict) -> dict:
+def check_label_quality(csv_path: str, bounds: dict, temporal_ml_min_events: int = 50) -> dict:
     """
     Reads the GLC CSV and evaluates the temporal and spatial quality of labels 
     within the pilot bounding box to determine the ML approach.
+    
+    The final decision to use temporal ML depends heavily on:
+    - number of absolute events
+    - number of independent events (spatial/temporal clustering)
+    - date precision (exact day vs approximate month)
+    - temporal coverage (spanning multiple monsoon seasons)
+    - spatial distribution (covering different slopes/lithology)
+    - class balance against negatives
+    - feasibility of spatial holdout validation
     """
     df = pd.read_csv(csv_path)
     
@@ -34,8 +43,9 @@ def check_label_quality(csv_path: str, bounds: dict) -> dict:
     independent_events_count = exact_day_events['parsed_date'].nunique()
     
     # Gating Logic
-    # We require at least 50 independent day-level events for a minimally defensible temporal model
-    use_temporal_ml = independent_events_count >= 50
+    # We use a configurable threshold (e.g., 50) as a starting heuristic, but it is NOT 
+    # a scientifically absolute threshold. It must be paired with distribution checks.
+    use_temporal_ml = independent_events_count >= temporal_ml_min_events
     
     return {
         "total_usable_events": total_usable,
@@ -50,7 +60,7 @@ if __name__ == "__main__":
     import os
     
     url = "https://data.nasa.gov/docs/legacy/Global_Landslide_Catalog_Export/Global_Landslide_Catalog_Export_rows.csv"
-    file_path = "../../data/raw/glc_legacy.csv"
+    file_path = "data/raw/glc_legacy.csv"
     
     if not os.path.exists(file_path):
         print("Downloading GLC dataset...")

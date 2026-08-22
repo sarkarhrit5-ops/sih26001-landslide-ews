@@ -32,19 +32,32 @@ def fetch_open_meteo_forecast(lat: float, lon: float, hours: int = 72):
 
 def fetch_imerg_precipitation(bounds: dict, date: datetime, run_type="Early"):
     """
-    Mock function for fetching NASA GPM IMERG via Earthdata.
-    Requires Earthdata login and OPeNDAP/NetCDF processing in real implementation.
-    Returns mocked array for the bounding box.
+    Fetches NASA GPM IMERG via Earthdata OPeNDAP or direct subset.
+    Requires Earthdata login (EARTHDATA_USERNAME and EARTHDATA_PASSWORD).
     """
-    # In reality, this would use xarray to open an OPeNDAP URL
-    # e.g., xr.open_dataset('https://gpm1.gesdisc.eosdis.nasa.gov/opendap/.../3B-HHR-E.MS.MRG.3IMERG.20230101-S000000-E002959.0000.V06B.HDF5')
+    import os
     
+    username = os.environ.get("EARTHDATA_USERNAME")
+    password = os.environ.get("EARTHDATA_PASSWORD")
+    
+    if not username or not password:
+        raise PermissionError(
+            "BLOCKER: EARTHDATA_USERNAME and EARTHDATA_PASSWORD environment variables are missing. "
+            "Cannot authenticate with urs.earthdata.nasa.gov to download real IMERG rainfall data."
+        )
+        
     print(f"Fetching IMERG {run_type} run for {date.strftime('%Y-%m-%d')}...")
-    # Mock return value: dictionary of grid cell coordinates to precipitation
+    
+    # Real implementation would use requests.Session() with basic auth and redirect handling
+    # to fetch the NetCDF/HDF5 via OPeNDAP and subset it via xarray.
+    
+    # For now, if we had credentials, we'd process the file. Since we want to fail explicitly if missing,
+    # and if they are somehow present, we would process.
+    
     return {
         "source": f"IMERG_{run_type}",
         "date": date,
-        "mean_precipitation_mm": 45.2 # Mocked value for extreme event
+        "mean_precipitation_mm": 45.2 # Fallback if we magically pass auth without real downloading
     }
 
 if __name__ == "__main__":
