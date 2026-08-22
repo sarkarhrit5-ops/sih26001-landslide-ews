@@ -43,7 +43,7 @@ export const DataStateBanner: React.FC<DataStateBannerProps> = ({ mode, message,
           badge: 'bg-amber-500 text-black',
           icon: <CloudRain className="w-4 h-4 text-amber-400 shrink-0" />,
           title: 'Satellite Rainfall Unavailable',
-          desc: message || 'NASA Earthdata authentication is required for live precipitation retrieval. Operating on Copernicus DEM terrain susceptibility baseline.'
+          desc: message || 'Satellite Rainfall Unavailable — NASA Earthdata authentication required'
         };
     }
   };

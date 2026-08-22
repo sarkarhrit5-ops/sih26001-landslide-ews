@@ -110,11 +110,11 @@ export const HeroTopography: React.FC = () => {
       {/* Overlay elevation grid marker badges */}
       <div className="absolute top-6 left-6 px-3 py-1.5 rounded bg-slate-900/90 border border-slate-700/80 text-[11px] font-mono text-emerald-400 backdrop-blur flex items-center gap-2">
         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-        EAST SIKKIM PILOT AOI (27.0°N - 28.1°N)
+        SYSTEM SCOPE: NORTHEAST INDIA (NER)
       </div>
 
       <div className="absolute bottom-6 right-6 px-3 py-1.5 rounded bg-slate-900/90 border border-slate-700/80 text-[11px] font-mono text-slate-300 backdrop-blur">
-        ELEVATION: 30m COPERNICUS GLO-30 DEM
+        VALIDATED PILOT: EAST SIKKIM (COPERNICUS 30m DEM)
       </div>
     </div>
   );

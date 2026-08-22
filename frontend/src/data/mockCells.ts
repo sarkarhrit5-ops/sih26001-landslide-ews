@@ -1,11 +1,32 @@
 import type { WarningLevel } from '../services/api';
 
+export interface ValidationCheckitem {
+  label: string;
+  completed: boolean;
+}
+
+export interface NERState {
+  id: string;
+  name: string;
+  capital: string;
+  lat: number;
+  lon: number;
+  zoom: number;
+  bounds: [[number, number], [number, number]];
+  status: 'VALIDATED_PILOT' | 'VALIDATION_PENDING';
+  statusLabel: 'VALIDATED PILOT' | 'VALIDATION PENDING';
+  coverageArea: string;
+  hasValidatedPilot: boolean;
+  checklist: ValidationCheckitem[];
+}
+
 export interface GridCell {
   id: string;
   name: string;
+  stateId: string;
   lat: number;
   lon: number;
-  bounds: [[number, number], [number, number]]; // [[minLat, minLon], [maxLat, maxLon]]
+  bounds: [[number, number], [number, number]];
   susceptibility: number;
   currentRain: number; // mm/24h
   forecastRain: number; // mm/72h
@@ -19,11 +40,146 @@ export interface GridCell {
   assets: string[];
 }
 
-// East Sikkim Pilot AOI Cells (27.0 N to 28.1 N, 88.0 E to 88.9 E)
+const PENDING_CHECKLIST: ValidationCheckitem[] = [
+  { label: 'NER geographic coverage', completed: true },
+  { label: 'Landslide inventory validation', completed: false },
+  { label: 'Terrain/data validation', completed: false },
+  { label: 'Rainfall integration', completed: false },
+  { label: 'Model validation', completed: false }
+];
+
+const VALIDATED_CHECKLIST: ValidationCheckitem[] = [
+  { label: 'NER geographic coverage', completed: true },
+  { label: 'Landslide inventory validated', completed: true },
+  { label: 'Terrain pipeline validated', completed: true },
+  { label: 'Susceptibility model validated', completed: true },
+  { label: 'Risk pipeline validated', completed: true }
+];
+
+// All 8 North Eastern Region (NER) States
+export const NER_STATES: NERState[] = [
+  {
+    id: 'sikkim',
+    name: 'Sikkim',
+    capital: 'Gangtok',
+    lat: 27.4,
+    lon: 88.5,
+    zoom: 9.5,
+    bounds: [[27.0, 88.0], [28.1, 88.9]],
+    status: 'VALIDATED_PILOT',
+    statusLabel: 'VALIDATED PILOT',
+    coverageArea: 'East Sikkim',
+    hasValidatedPilot: true,
+    checklist: VALIDATED_CHECKLIST
+  },
+  {
+    id: 'arunachal_pradesh',
+    name: 'Arunachal Pradesh',
+    capital: 'Itanagar',
+    lat: 28.2,
+    lon: 94.5,
+    zoom: 7.5,
+    bounds: [[26.5, 91.5], [29.5, 97.5]],
+    status: 'VALIDATION_PENDING',
+    statusLabel: 'VALIDATION PENDING',
+    coverageArea: 'Entire State (Validation Pending)',
+    hasValidatedPilot: false,
+    checklist: PENDING_CHECKLIST
+  },
+  {
+    id: 'assam',
+    name: 'Assam',
+    capital: 'Dispur / Guwahati',
+    lat: 26.2,
+    lon: 92.5,
+    zoom: 7.5,
+    bounds: [[24.1, 89.7], [28.0, 96.0]],
+    status: 'VALIDATION_PENDING',
+    statusLabel: 'VALIDATION PENDING',
+    coverageArea: 'Entire State (Validation Pending)',
+    hasValidatedPilot: false,
+    checklist: PENDING_CHECKLIST
+  },
+  {
+    id: 'manipur',
+    name: 'Manipur',
+    capital: 'Imphal',
+    lat: 24.8,
+    lon: 93.9,
+    zoom: 8.5,
+    bounds: [[23.8, 93.0], [25.7, 94.8]],
+    status: 'VALIDATION_PENDING',
+    statusLabel: 'VALIDATION PENDING',
+    coverageArea: 'Entire State (Validation Pending)',
+    hasValidatedPilot: false,
+    checklist: PENDING_CHECKLIST
+  },
+  {
+    id: 'meghalaya',
+    name: 'Meghalaya',
+    capital: 'Shillong',
+    lat: 25.5,
+    lon: 91.5,
+    zoom: 8.5,
+    bounds: [[25.0, 89.8], [26.1, 92.8]],
+    status: 'VALIDATION_PENDING',
+    statusLabel: 'VALIDATION PENDING',
+    coverageArea: 'Entire State (Validation Pending)',
+    hasValidatedPilot: false,
+    checklist: PENDING_CHECKLIST
+  },
+  {
+    id: 'mizoram',
+    name: 'Mizoram',
+    capital: 'Aizawl',
+    lat: 23.1,
+    lon: 92.8,
+    zoom: 8.5,
+    bounds: [[21.9, 92.2], [24.5, 93.4]],
+    status: 'VALIDATION_PENDING',
+    statusLabel: 'VALIDATION PENDING',
+    coverageArea: 'Entire State (Validation Pending)',
+    hasValidatedPilot: false,
+    checklist: PENDING_CHECKLIST
+  },
+  {
+    id: 'nagaland',
+    name: 'Nagaland',
+    capital: 'Kohima',
+    lat: 26.1,
+    lon: 94.5,
+    zoom: 8.5,
+    bounds: [[25.2, 93.3], [27.0, 95.3]],
+    status: 'VALIDATION_PENDING',
+    statusLabel: 'VALIDATION PENDING',
+    coverageArea: 'Entire State (Validation Pending)',
+    hasValidatedPilot: false,
+    checklist: PENDING_CHECKLIST
+  },
+  {
+    id: 'tripura',
+    name: 'Tripura',
+    capital: 'Agartala',
+    lat: 23.8,
+    lon: 91.3,
+    zoom: 8.5,
+    bounds: [[22.9, 91.1], [24.5, 92.4]],
+    status: 'VALIDATION_PENDING',
+    statusLabel: 'VALIDATION PENDING',
+    coverageArea: 'Entire State (Validation Pending)',
+    hasValidatedPilot: false,
+    checklist: PENDING_CHECKLIST
+  }
+];
+
+export const NER_BOUNDS: [[number, number], [number, number]] = [[21.8, 87.8], [29.5, 97.4]];
+
+// Validated East Sikkim Pilot Cells
 export const EAST_SIKKIM_CELLS: GridCell[] = [
   {
     id: 'cell_gangtok_central',
     name: 'Gangtok Central & STNM Corridor',
+    stateId: 'sikkim',
     lat: 27.33,
     lon: 88.61,
     bounds: [[27.30, 88.58], [27.36, 88.64]],
@@ -42,6 +198,7 @@ export const EAST_SIKKIM_CELLS: GridCell[] = [
   {
     id: 'cell_dikchu_gorge',
     name: 'Dikchu River Basin & Slope Zone',
+    stateId: 'sikkim',
     lat: 27.39,
     lon: 88.52,
     bounds: [[27.36, 88.49], [27.42, 88.55]],
@@ -60,6 +217,7 @@ export const EAST_SIKKIM_CELLS: GridCell[] = [
   {
     id: 'cell_pakyong_slope',
     name: 'Pakyong Airport Approach Slopes',
+    stateId: 'sikkim',
     lat: 27.24,
     lon: 88.59,
     bounds: [[27.21, 88.56], [27.27, 88.62]],
@@ -78,6 +236,7 @@ export const EAST_SIKKIM_CELLS: GridCell[] = [
   {
     id: 'cell_singtam_rangpo',
     name: 'Singtam - Rangpo Teesta Corridor',
+    stateId: 'sikkim',
     lat: 27.15,
     lon: 88.50,
     bounds: [[27.12, 88.47], [27.18, 88.53]],
@@ -96,6 +255,7 @@ export const EAST_SIKKIM_CELLS: GridCell[] = [
   {
     id: 'cell_mangan_south',
     name: 'Mangan South Ridge Approach',
+    stateId: 'sikkim',
     lat: 27.50,
     lon: 88.53,
     bounds: [[27.47, 88.50], [27.53, 88.56]],
@@ -114,6 +274,7 @@ export const EAST_SIKKIM_CELLS: GridCell[] = [
   {
     id: 'cell_nathula_pass',
     name: 'Nathula Alpine Pass Corridor',
+    stateId: 'sikkim',
     lat: 27.38,
     lon: 88.82,
     bounds: [[27.35, 88.79], [27.41, 88.85]],
@@ -132,12 +293,12 @@ export const EAST_SIKKIM_CELLS: GridCell[] = [
 ];
 
 export const REGIONAL_SUMMARY = {
-  regionName: 'East Sikkim Pilot AOI',
-  boundsStr: '27.0°N - 28.1°N, 88.0°E - 88.9°E',
+  systemCoverage: 'Northeast India — 8 States',
+  modelValidation: 'East Sikkim — Validated Pilot',
   overallRisk: 'HIGH' as WarningLevel,
   activeHighRiskCellsCount: 3,
   totalMonitoredCells: 6,
   totalExposedAssets: 18,
   demSource: 'Copernicus 30m GLO-30 DEM',
-  rainfallStatusNote: 'Satellite rainfall unavailable: NASA Earthdata authentication is required for live precipitation retrieval.'
+  rainfallStatusNote: 'Satellite Rainfall Unavailable — NASA Earthdata authentication required'
 };

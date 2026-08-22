@@ -4,15 +4,16 @@ import type { MapLayersState } from './LandslideMap';
 import { IntelligencePanel } from './IntelligencePanel';
 import { BottomInfoStrip } from './BottomInfoStrip';
 import { LayerControl } from './LayerControl';
-import type { GridCell } from '../../data/mockCells';
-import { REGIONAL_SUMMARY } from '../../data/mockCells';
-import { MapPin, ArrowLeft, Radio, Layers } from 'lucide-react';
+import type { GridCell, NERState } from '../../data/mockCells';
+import { NER_STATES } from '../../data/mockCells';
+import { MapPin, ArrowLeft, Radio, Layers, ChevronDown } from 'lucide-react';
 
 interface DashboardPageProps {
   onNavigateToLanding: () => void;
 }
 
 export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLanding }) => {
+  const [selectedState, setSelectedState] = useState<NERState | null>(null);
   const [selectedCell, setSelectedCell] = useState<GridCell | null>(null);
   const [showLayerControl, setShowLayerControl] = useState<boolean>(false);
 
@@ -26,6 +27,18 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
 
   const handleToggleLayer = (key: keyof MapLayersState) => {
     setLayers((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleStateSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const val = e.target.value;
+    if (val === 'all') {
+      setSelectedState(null);
+      setSelectedCell(null);
+    } else {
+      const st = NER_STATES.find((s) => s.id === val) || null;
+      setSelectedState(st);
+      setSelectedCell(null);
+    }
   };
 
   return (
@@ -52,19 +65,39 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
                   SIH26001
                 </span>
               </div>
-              <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                <MapPin className="w-3 h-3 text-emerald-400" />
-                <span>{REGIONAL_SUMMARY.regionName} ({REGIONAL_SUMMARY.boundsStr})</span>
+              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                <span>System Scope: Northeast India — 8 States</span>
+                <span>•</span>
+                <span className="text-emerald-400 font-medium">Model Validation: East Sikkim — Validated Pilot</span>
               </div>
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
+          {/* State / Region Selector Dropdown containing all 8 NER States */}
+          <div className="relative flex items-center">
+            <MapPin className="w-3.5 h-3.5 text-emerald-400 absolute left-3 pointer-events-none" />
+            <select
+              value={selectedState ? selectedState.id : 'all'}
+              onChange={handleStateSelectChange}
+              className="bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-8 py-1.5 text-xs font-medium text-slate-200 focus:outline-none focus:border-emerald-500 appearance-none cursor-pointer"
+            >
+              <option value="all">All Northeast India (NER — 8 States)</option>
+              {NER_STATES.map((st) => (
+                <option key={st.id} value={st.id}>
+                  {st.name} {st.hasValidatedPilot ? '(Active Validated Pilot)' : '(Validation Pending)'}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 pointer-events-none" />
+          </div>
+
           {/* Data Status Indicator */}
-          <div className="px-3 py-1 rounded-full bg-slate-900 border border-amber-500/40 text-amber-300 text-xs flex items-center gap-2 font-mono">
+          <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-amber-500/40 text-amber-300 text-xs flex items-center gap-2 font-mono">
             <Radio className="w-3 h-3 text-amber-400 animate-pulse" />
-            <span className="hidden sm:inline">Satellite Rainfall:</span> UNAVAILABLE
+            <span className="hidden xl:inline">Satellite Rainfall Unavailable — NASA Earthdata authentication required</span>
+            <span className="xl:hidden">LIVE DATA UNAVAILABLE</span>
           </div>
 
           <button
@@ -89,8 +122,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
         {/* Main Map Area (Approx 65-70% workspace) */}
         <div className="lg:col-span-8 xl:col-span-8 flex flex-col h-full min-h-[450px]">
           <LandslideMap
+            selectedState={selectedState}
             selectedCell={selectedCell}
             onSelectCell={setSelectedCell}
+            onSelectState={setSelectedState}
             layers={layers}
           />
         </div>
@@ -98,9 +133,11 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
         {/* Contextual Intelligence Panel (Right Panel - Approx 30-35% workspace) */}
         <div className="lg:col-span-4 xl:col-span-4 h-full min-h-[450px]">
           <IntelligencePanel
+            selectedState={selectedState}
             selectedCell={selectedCell}
             onClearSelection={() => setSelectedCell(null)}
             onSelectCell={setSelectedCell}
+            onSelectState={setSelectedState}
           />
         </div>
       </div>

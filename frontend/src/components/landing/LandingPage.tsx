@@ -68,7 +68,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigateToDashboard 
             </h1>
 
             <p className="text-slate-300 text-base leading-relaxed max-w-xl">
-              Combining 30m terrain susceptibility, NASA GPM rainfall triggers, weather forecasts, and infrastructure exposure to deliver dynamic landslide risk intelligence for Northeast India.
+              Combining 30m terrain susceptibility, NASA GPM rainfall triggers, weather forecasts, and infrastructure exposure to deliver dynamic landslide risk intelligence across all 8 North Eastern states (NER).
             </p>
 
             <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs text-slate-400 flex items-start gap-2.5">
