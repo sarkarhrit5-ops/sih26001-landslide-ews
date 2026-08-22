@@ -1,0 +1,85 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+@layer base {
+  :root {
+    --bg-dark: #0a0d12;
+    --bg-surface: #111620;
+    --bg-panel: #161c27;
+    --bg-border: #232b3a;
+    
+    --color-low: #10b981;      /* Muted emerald green */
+    --color-medium: #f59e0b;   /* Warning amber */
+    --color-high: #f97316;     /* High hazard orange */
+    --color-extreme: #ef4444;  /* Emergency red */
+  }
+
+  body {
+    background-color: var(--bg-dark);
+    color: #e2e8f0;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+  }
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom leaflet terrain map styling */
+.leaflet-container {
+  background-color: #0b0f17 !important;
+  font-family: inherit;
+}
+
+.leaflet-popup-content-wrapper {
+  background-color: #161c27 !important;
+  color: #f1f5f9 !important;
+  border: 1px solid #2e384d !important;
+  border-radius: 8px !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5) !important;
+}
+
+.leaflet-popup-tip {
+  background-color: #161c27 !important;
+}
+
+/* Topographic Contour Background effect */
+.topo-contour-bg {
+  background-image: radial-gradient(circle at 50% 50%, rgba(20, 30, 45, 0.5) 0%, rgba(10, 13, 18, 0.95) 100%),
+    repeating-radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.03) 0, rgba(255, 255, 255, 0.03) 1px, transparent 2px, transparent 40px);
+}
+
+/* Pulse indicator for live monitoring */
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.15); opacity: 0.4; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0e1219;
+}
+::-webkit-scrollbar-thumb {
+  background: #242c3d;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #37435c;
+}
