@@ -68,3 +68,14 @@ def get_exposure_alerts():
     assets["geometry"] = assets["geometry"].apply(lambda geom: geom.wkt)
     alert_list = assets.to_dict(orient="records")
     return {"exposed_assets": alert_list}
+
+@router.get("/validation/status")
+def get_validation_status():
+    import json
+    import os
+    file_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "processed", "state_validation.json")
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            return json.load(f)
+    else:
+        return []

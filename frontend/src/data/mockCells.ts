@@ -13,8 +13,8 @@ export interface NERState {
   lon: number;
   zoom: number;
   bounds: [[number, number], [number, number]];
-  status: 'VALIDATED_PILOT' | 'VALIDATION_PENDING';
-  statusLabel: 'VALIDATED PILOT' | 'VALIDATION PENDING';
+  status: 'VALIDATED_PILOT' | 'COMPLETED' | 'PROCESSING' | 'DATA_UNAVAILABLE' | 'INSUFFICIENT_DATA' | 'ERROR' | 'VALIDATION_PENDING';
+  statusLabel: string;
   coverageArea: string;
   hasValidatedPilot: boolean;
   checklist: ValidationCheckitem[];

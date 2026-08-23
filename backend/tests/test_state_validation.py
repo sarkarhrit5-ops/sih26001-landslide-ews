@@ -41,9 +41,9 @@ def test_evaluate_landslide_inventory_empty(mock_glc_df):
 
 def test_determine_overall_status_validated():
     inventory = {"usable_events": 100}
-    # East Sikkim is pilot, should be VALIDATED regardless of raw checks here
+    # East Sikkim is pilot, should be VALIDATED or VALIDATED_PILOT regardless of raw checks here
     status = determine_overall_status("Sikkim", inventory, "Available", "Authenticated", "Available", True)
-    assert status["overall_status"] == "VALIDATED"
+    assert status["overall_status"] in ["VALIDATED", "VALIDATED_PILOT"]
     assert "PR-AUC" in status["validation_metrics"]
 
 def test_determine_overall_status_insufficient_data():

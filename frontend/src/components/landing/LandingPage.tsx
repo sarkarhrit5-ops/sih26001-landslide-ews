@@ -1,6 +1,7 @@
 import React from 'react';
 import { HeroTopography } from './HeroTopography';
 import { Shield, CloudRain, Mountain, Activity, ArrowRight, Layers, Cpu, Eye, Lock } from 'lucide-react';
+import logo from '../../logo.png';
 
 interface LandingPageProps {
   onNavigateToDashboard: () => void;
@@ -17,12 +18,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigateToDashboard 
       <header className="sticky top-0 z-50 bg-[#0a0d12]/90 backdrop-blur-md border-b border-slate-800/80 px-6 py-4">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-emerald-950 border border-emerald-500/50 flex items-center justify-center text-emerald-400 font-mono font-bold text-sm shadow-md">
-              SIH
-            </div>
+            <img src={logo} alt="SIH landslide intelligence logo" className="w-9 h-9 rounded-full object-cover border border-emerald-500/50 shadow-md" />
             <div>
               <div className="font-bold tracking-tight text-slate-100 text-sm flex items-center gap-2">
-                SIH26001
+                SIH 2026
                 <span className="text-[10px] uppercase font-mono px-1.5 py-0.2 rounded bg-slate-800 text-emerald-400 border border-slate-700">
                   Landslide EWS
                 </span>
@@ -55,7 +54,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigateToDashboard 
           <div className="lg:col-span-6 space-y-6">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-xs font-medium text-emerald-400">
               <Shield className="w-3.5 h-3.5" />
-              <span>SIH26001 • Geospatial Risk Intelligence</span>
+              <span>SIH 2026 • Geospatial Risk Intelligence</span>
             </div>
 
             <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight text-white leading-[1.1]">
@@ -217,7 +216,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigateToDashboard 
       <footer className="mt-auto border-t border-slate-800/80 bg-slate-950 px-6 py-8 text-xs text-slate-500">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div>
-            <span className="text-slate-300 font-semibold">SIH26001</span> — AI-Based Early Warning & Landslide Risk Monitoring System in NER
+            <span className="text-slate-300 font-semibold">SIH 2026</span> — AI-Based Early Warning & Landslide Risk Monitoring System in NER
           </div>
           <div className="flex items-center gap-6 text-slate-400">
             <span>Disaster Management Division</span>

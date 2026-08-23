@@ -1,4 +1,4 @@
-# SIH26001 — Landslide Early Warning System
+# SIH 2026 — Landslide Early Warning System
 
 AI-driven dynamic landslide risk monitoring and early-warning system for Northeast India.
 
@@ -22,7 +22,7 @@ Research and architecture phase.
 
 ## Problem Statement
 
-SIH26001 — AI-Based Early Warning and Landslide Risk Monitoring.
+SIH 2026 — AI-Based Early Warning and Landslide Risk Monitoring.
 
 ## Development Philosophy
 

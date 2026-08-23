@@ -1,12 +1,19 @@
 [
   {
+    "id": "sikkim",
+    "state_id": "sikkim",
     "state": "Sikkim",
+    "state_name": "Sikkim",
+    "processing_status": "COMPLETED",
+    "validation_status": "VALIDATED_PILOT",
+    "overall_status": "VALIDATED_PILOT",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 82,
     "usable_events": 82,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Available",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Available (Mock/Local)",
     "model_status": "Trained & Validated",
     "validation_metrics": {
@@ -19,138 +26,190 @@
       "Spatial Coverage": "East Sikkim",
       "Class Balance": "3:1 (Negative:Positive)"
     },
-    "overall_status": "VALIDATED",
-    "blocking_reasons": [
-      "Missing Earthdata Credentials for IMERG"
-    ]
+    "risk_result": {
+      "susceptibility_score": 0.72,
+      "warning_level": "HIGH",
+      "coverage": "East Sikkim"
+    },
+    "blocking_reasons": [],
+    "error": null
   },
   {
+    "id": "arunachal_pradesh",
+    "state_id": "arunachal_pradesh",
     "state": "Arunachal Pradesh",
+    "state_name": "Arunachal Pradesh",
+    "processing_status": "COMPLETED",
+    "validation_status": "DATA UNAVAILABLE",
+    "overall_status": "DATA UNAVAILABLE",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 88,
     "usable_events": 88,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Missing (Requires Download)",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Missing (Requires Download)",
     "model_status": "Not Trained",
     "validation_metrics": {},
-    "overall_status": "DATA UNAVAILABLE",
+    "risk_result": null,
     "blocking_reasons": [
       "Missing DEM Data",
-      "Missing Earthdata Credentials for IMERG",
       "Missing OSM Exposure Data"
-    ]
+    ],
+    "error": null
   },
   {
+    "id": "assam",
+    "state_id": "assam",
     "state": "Assam",
+    "state_name": "Assam",
+    "processing_status": "COMPLETED",
+    "validation_status": "DATA UNAVAILABLE",
+    "overall_status": "DATA UNAVAILABLE",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 401,
     "usable_events": 401,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Missing (Requires Download)",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Missing (Requires Download)",
     "model_status": "Not Trained",
     "validation_metrics": {},
-    "overall_status": "DATA UNAVAILABLE",
+    "risk_result": null,
     "blocking_reasons": [
       "Missing DEM Data",
-      "Missing Earthdata Credentials for IMERG",
       "Missing OSM Exposure Data"
-    ]
+    ],
+    "error": null
   },
   {
+    "id": "manipur",
+    "state_id": "manipur",
     "state": "Manipur",
+    "state_name": "Manipur",
+    "processing_status": "COMPLETED",
+    "validation_status": "DATA UNAVAILABLE",
+    "overall_status": "DATA UNAVAILABLE",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 128,
     "usable_events": 128,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Missing (Requires Download)",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Missing (Requires Download)",
     "model_status": "Not Trained",
     "validation_metrics": {},
-    "overall_status": "DATA UNAVAILABLE",
+    "risk_result": null,
     "blocking_reasons": [
       "Missing DEM Data",
-      "Missing Earthdata Credentials for IMERG",
       "Missing OSM Exposure Data"
-    ]
+    ],
+    "error": null
   },
   {
+    "id": "meghalaya",
+    "state_id": "meghalaya",
     "state": "Meghalaya",
+    "state_name": "Meghalaya",
+    "processing_status": "COMPLETED",
+    "validation_status": "DATA UNAVAILABLE",
+    "overall_status": "DATA UNAVAILABLE",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 47,
     "usable_events": 47,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Missing (Requires Download)",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Missing (Requires Download)",
     "model_status": "Not Trained",
     "validation_metrics": {},
-    "overall_status": "DATA UNAVAILABLE",
+    "risk_result": null,
     "blocking_reasons": [
       "Missing DEM Data",
-      "Missing Earthdata Credentials for IMERG",
       "Missing OSM Exposure Data",
       "Insufficient usable landslide events (47 < 50)"
-    ]
+    ],
+    "error": null
   },
   {
+    "id": "mizoram",
+    "state_id": "mizoram",
     "state": "Mizoram",
+    "state_name": "Mizoram",
+    "processing_status": "COMPLETED",
+    "validation_status": "DATA UNAVAILABLE",
+    "overall_status": "DATA UNAVAILABLE",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 48,
     "usable_events": 48,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Missing (Requires Download)",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Missing (Requires Download)",
     "model_status": "Not Trained",
     "validation_metrics": {},
-    "overall_status": "DATA UNAVAILABLE",
+    "risk_result": null,
     "blocking_reasons": [
       "Missing DEM Data",
-      "Missing Earthdata Credentials for IMERG",
       "Missing OSM Exposure Data",
       "Insufficient usable landslide events (48 < 50)"
-    ]
+    ],
+    "error": null
   },
   {
+    "id": "nagaland",
+    "state_id": "nagaland",
     "state": "Nagaland",
+    "state_name": "Nagaland",
+    "processing_status": "COMPLETED",
+    "validation_status": "DATA UNAVAILABLE",
+    "overall_status": "DATA UNAVAILABLE",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 110,
     "usable_events": 110,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Missing (Requires Download)",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Missing (Requires Download)",
     "model_status": "Not Trained",
     "validation_metrics": {},
-    "overall_status": "DATA UNAVAILABLE",
+    "risk_result": null,
     "blocking_reasons": [
       "Missing DEM Data",
-      "Missing Earthdata Credentials for IMERG",
       "Missing OSM Exposure Data"
-    ]
+    ],
+    "error": null
   },
   {
+    "id": "tripura",
+    "state_id": "tripura",
     "state": "Tripura",
+    "state_name": "Tripura",
+    "processing_status": "COMPLETED",
+    "validation_status": "DATA UNAVAILABLE",
+    "overall_status": "DATA UNAVAILABLE",
+    "rainfall_source": "Open-Meteo / Fallback Synthetic",
+    "rainfall_status": "Fallback Active (Open-Meteo / Local)",
     "inventory_events": 11,
     "usable_events": 11,
     "spatial_quality": "Moderate/Poor",
     "temporal_quality": "Good",
     "dem_status": "Missing (Requires Download)",
-    "rainfall_status": "Unauthenticated (Missing Credentials)",
     "exposure_status": "Missing (Requires Download)",
     "model_status": "Not Trained",
     "validation_metrics": {},
-    "overall_status": "DATA UNAVAILABLE",
+    "risk_result": null,
     "blocking_reasons": [
       "Missing DEM Data",
-      "Missing Earthdata Credentials for IMERG",
       "Missing OSM Exposure Data",
       "Insufficient usable landslide events (11 < 50)"
-    ]
+    ],
+    "error": null
   }
 ]

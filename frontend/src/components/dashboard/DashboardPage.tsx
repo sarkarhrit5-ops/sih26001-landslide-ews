@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { LandslideMap } from './LandslideMap';
 import type { MapLayersState } from './LandslideMap';
 import { IntelligencePanel } from './IntelligencePanel';
@@ -8,15 +8,110 @@ import type { PrimaryLayer, ForecastTime } from './LandslideMap';
 import type { GridCell, NERState } from '../../data/mockCells';
 import { NER_STATES } from '../../data/mockCells';
 import { MapPin, ArrowLeft, Radio, Layers, ChevronDown } from 'lucide-react';
+import { apiService } from '../../services/api';
+import logo from '../../logo.png';
 
 interface DashboardPageProps {
   onNavigateToLanding: () => void;
 }
 
 export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLanding }) => {
-  const [selectedState, setSelectedState] = useState<NERState | null>(null);
+  const [states, setStates] = useState<NERState[]>(NER_STATES);
+  const [selectedStateId, setSelectedStateId] = useState<string | null>(null);
   const [selectedCell, setSelectedCell] = useState<GridCell | null>(null);
   const [showLayerControl, setShowLayerControl] = useState<boolean>(false);
+  const [rainfallNote, setRainfallNote] = useState<string>('Satellite Rainfall Unavailable — NASA Earthdata authentication required');
+
+  const selectedState = selectedStateId ? states.find((s) => s.id === selectedStateId) || null : null;
+
+  useEffect(() => {
+    apiService.getValidationStatus()
+      .then((data) => {
+        if (!data || data.length === 0) return;
+        
+        const updated = states.map((st) => {
+          const report = data.find((r) => 
+            (r.state_id === st.id) || 
+            (r.id === st.id) || 
+            (r.state && r.state.toLowerCase().replace(/\s+/g, '_') === st.id)
+          );
+          if (!report) return st;
+
+          let status: NERState['status'] = 'VALIDATION_PENDING';
+          let statusLabel = 'VALIDATION PENDING';
+          let hasValidatedPilot = false;
+
+          const rawStatus = (report.overall_status || report.validation_status || '').toUpperCase();
+          switch (rawStatus) {
+            case 'VALIDATED':
+            case 'VALIDATED_PILOT':
+              status = 'VALIDATED_PILOT';
+              statusLabel = 'VALIDATED PILOT';
+              hasValidatedPilot = true;
+              break;
+            case 'COMPLETED':
+              status = 'COMPLETED';
+              statusLabel = 'COMPLETED';
+              hasValidatedPilot = true;
+              break;
+            case 'PROCESSING':
+              status = 'PROCESSING';
+              statusLabel = 'PROCESSING';
+              break;
+            case 'DATA UNAVAILABLE':
+            case 'DATA_UNAVAILABLE':
+              status = 'DATA_UNAVAILABLE';
+              statusLabel = 'DATA UNAVAILABLE';
+              break;
+            case 'INSUFFICIENT DATA':
+            case 'INSUFFICIENT_DATA':
+              status = 'INSUFFICIENT_DATA';
+              statusLabel = 'INSUFFICIENT DATA';
+              break;
+            case 'ERROR':
+              status = 'ERROR';
+              statusLabel = 'ERROR';
+              break;
+            case 'VALIDATION PENDING':
+            case 'VALIDATION_PENDING':
+            default:
+              status = 'VALIDATION_PENDING';
+              statusLabel = 'VALIDATION PENDING';
+              break;
+          }
+
+          // Build dynamic checklist based on report
+          const isSikkim = st.id === 'sikkim';
+          const dynamicChecklist = [
+            { label: 'NER geographic coverage', completed: true },
+            { label: 'Landslide inventory validation', completed: report.usable_events >= 50 || isSikkim },
+            { label: 'Terrain/data validation', completed: report.dem_status === 'Available' || isSikkim },
+            { label: 'Model validation', completed: report.overall_status === 'VALIDATED' || report.overall_status === 'COMPLETED' }
+          ];
+
+          return {
+            ...st,
+            status,
+            statusLabel,
+            hasValidatedPilot,
+            coverageArea: isSikkim ? 'East Sikkim' : `Entire State (${statusLabel})`,
+            checklist: dynamicChecklist
+          };
+        });
+        setStates(updated);
+        
+        // Find if there is any rainfall fallback note
+        const anyRainReport = data.find(r => r.rainfall_status.includes('Fallback') || r.rainfall_status.includes('Unavailable'));
+        if (anyRainReport) {
+          setRainfallNote(anyRainReport.rainfall_status);
+        } else {
+          setRainfallNote('Satellite Rainfall Active');
+        }
+      })
+      .catch((err) => {
+        console.warn('[DashboardPage] Failed to load dynamic validation status:', err);
+      });
+  }, []);
 
   const [layers, setLayers] = useState<MapLayersState>({
     primary: 'risk',
@@ -34,11 +129,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
   const handleStateSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
     if (val === 'all') {
-      setSelectedState(null);
+      setSelectedStateId(null);
       setSelectedCell(null);
     } else {
-      const st = NER_STATES.find((s) => s.id === val) || null;
-      setSelectedState(st);
+      setSelectedStateId(val);
       setSelectedCell(null);
     }
   };
@@ -57,14 +151,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
           </button>
 
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-950 border border-emerald-500/50 flex items-center justify-center text-emerald-400 font-mono font-bold text-xs shadow-md">
-              SIH
-            </div>
+            <img src={logo} alt="SIH landslide intelligence logo" className="w-8 h-8 rounded-full object-cover border border-emerald-500/50 shadow-md" />
             <div>
               <div className="font-bold tracking-tight text-white text-sm flex items-center gap-2">
                 LANDSLIDE INTELLIGENCE
                 <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-800 text-emerald-400 border border-slate-700">
-                  SIH26001
+                  SIH 2026
                 </span>
               </div>
               <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
@@ -86,9 +178,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
               className="bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-8 py-1.5 text-xs font-medium text-slate-200 focus:outline-none focus:border-emerald-500 appearance-none cursor-pointer"
             >
               <option value="all">All Northeast India (NER — 8 States)</option>
-              {NER_STATES.map((st) => (
+              {states.map((st) => (
                 <option key={st.id} value={st.id}>
-                  {st.name} {st.hasValidatedPilot ? '(Active Validated Pilot)' : '(Validation Pending)'}
+                  {st.name} ({st.statusLabel})
                 </option>
               ))}
             </select>
@@ -98,7 +190,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
           {/* Data Status Indicator */}
           <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-amber-500/40 text-amber-300 text-xs flex items-center gap-2 font-mono">
             <Radio className="w-3 h-3 text-amber-400 animate-pulse" />
-            <span className="hidden xl:inline">Satellite Rainfall Unavailable — NASA Earthdata authentication required</span>
+            <span className="hidden xl:inline">{rainfallNote}</span>
             <span className="xl:hidden">LIVE DATA UNAVAILABLE</span>
           </div>
 
@@ -130,8 +222,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
           <LandslideMap
             selectedState={selectedState}
             selectedCell={selectedCell}
+            states={states}
             onSelectCell={setSelectedCell}
-            onSelectState={setSelectedState}
+            onSelectState={(st) => setSelectedStateId(st ? st.id : null)}
             layers={layers}
           />
         </div>
@@ -141,9 +234,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
           <IntelligencePanel
             selectedState={selectedState}
             selectedCell={selectedCell}
+            states={states}
             onClearSelection={() => setSelectedCell(null)}
             onSelectCell={setSelectedCell}
-            onSelectState={setSelectedState}
+            onSelectState={(st) => setSelectedStateId(st ? st.id : null)}
           />
         </div>
       </div>

@@ -58,3 +58,20 @@ def test_exposure_alerts():
     data = response.json()
     assert "exposed_assets" in data
     assert len(data["exposed_assets"]) > 0
+
+def test_validation_status_endpoint():
+    response = client.get("/api/v1/validation/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) == 8
+    state_names = [item["state"] for item in data]
+    assert "Sikkim" in state_names
+    assert "Arunachal Pradesh" in state_names
+    assert "Assam" in state_names
+    assert "Manipur" in state_names
+    assert "Meghalaya" in state_names
+    assert "Mizoram" in state_names
+    assert "Nagaland" in state_names
+    assert "Tripura" in state_names
+

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { GridCell, NERState } from '../../data/mockCells';
-import { REGIONAL_SUMMARY, EAST_SIKKIM_CELLS, NER_STATES } from '../../data/mockCells';
+import { REGIONAL_SUMMARY, EAST_SIKKIM_CELLS } from '../../data/mockCells';
 import { WarningBadge } from '../common/WarningBadge';
 import { DataStateBanner } from '../common/DataStateBanner';
 import { apiService } from '../../services/api';
@@ -10,6 +10,7 @@ import { Shield, ArrowLeft, Mountain, CloudRain, Layers, HelpCircle, Loader2, Ma
 interface IntelligencePanelProps {
   selectedState: NERState | null;
   selectedCell: GridCell | null;
+  states: NERState[];
   onClearSelection: () => void;
   onSelectCell: (cell: GridCell) => void;
   onSelectState: (state: NERState | null) => void;
@@ -18,6 +19,7 @@ interface IntelligencePanelProps {
 export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
   selectedState,
   selectedCell,
+  states,
   onClearSelection,
   onSelectCell,
   onSelectState
@@ -123,14 +125,14 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
             </div>
           </div>
 
-          {/* If Sikkim -> Link to Validated East Sikkim Cells */}
+          {/* If selected state has cells -> Link to Validated Cells */}
           {isValidated && (
             <div className="space-y-2 pt-2 border-t border-slate-800">
               <div className="text-xs font-mono font-semibold uppercase text-emerald-400 tracking-wider">
-                Validated East Sikkim Risk Cells ({EAST_SIKKIM_CELLS.length})
+                Validated {selectedState.name} Risk Cells ({EAST_SIKKIM_CELLS.filter(cell => cell.stateId === selectedState.id).length})
               </div>
               <div className="space-y-1.5">
-                {EAST_SIKKIM_CELLS.slice(0, 4).map((cell) => (
+                {EAST_SIKKIM_CELLS.filter(cell => cell.stateId === selectedState.id).slice(0, 4).map((cell) => (
                   <button
                     key={cell.id}
                     onClick={() => onSelectCell(cell)}
@@ -153,7 +155,7 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
         </div>
 
         <div className="text-[11px] text-slate-500 border-t border-slate-800 pt-3 font-mono">
-          SIH26001 Architecture: Designed for progressive expansion across all 8 NER states.
+          SIH 2026 Architecture: Designed for progressive expansion across all 8 NER states.
         </div>
       </div>
     );
@@ -202,7 +204,7 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
             </div>
 
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-              {NER_STATES.map((st) => {
+              {states.map((st) => {
                 const isSelected = selectedState?.id === st.id;
                 const isPilot = st.hasValidatedPilot;
 
@@ -215,6 +217,14 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
                         ? 'bg-emerald-950/60 border-emerald-500/80 text-white'
                         : isPilot
                         ? 'bg-slate-950/60 hover:bg-slate-800/80 border-emerald-800/60 text-slate-200'
+                        : st.status === 'PROCESSING'
+                        ? 'bg-blue-950/40 hover:bg-blue-900/60 border-blue-900/60 text-blue-200'
+                        : st.status === 'DATA_UNAVAILABLE'
+                        ? 'bg-amber-950/30 hover:bg-slate-800/50 border-amber-900/40 text-amber-300/80'
+                        : st.status === 'INSUFFICIENT_DATA'
+                        ? 'bg-amber-950/20 hover:bg-slate-800/50 border-amber-800/40 text-amber-400/80'
+                        : st.status === 'ERROR'
+                        ? 'bg-red-950/30 hover:bg-slate-800/50 border-red-900/40 text-red-400/80'
                         : 'bg-slate-950/30 hover:bg-slate-800/50 border-slate-800/80 text-slate-400'
                     }`}
                   >
@@ -232,6 +242,14 @@ export const IntelligencePanel: React.FC<IntelligencePanelProps> = ({
                       className={`text-[9px] font-mono px-2 py-0.5 rounded font-semibold uppercase ${
                         isPilot
                           ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                          : st.status === 'PROCESSING'
+                          ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40'
+                          : st.status === 'DATA_UNAVAILABLE'
+                          ? 'bg-amber-500/10 text-amber-400/95 border border-amber-500/30'
+                          : st.status === 'INSUFFICIENT_DATA'
+                          ? 'bg-amber-500/10 text-amber-300 border border-amber-500/30'
+                          : st.status === 'ERROR'
+                          ? 'bg-red-500/20 text-red-300 border border-red-500/40'
                           : 'bg-slate-800 text-slate-400 border border-slate-700'
                       }`}
                     >

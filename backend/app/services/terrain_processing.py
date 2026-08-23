@@ -61,7 +61,7 @@ def calculate_tpi(dem_array):
     tpi = z[1:-1, 1:-1] - np.mean(neighborhoods, axis=0)
     return tpi
 
-def process_dem_in_chunks(dem_path, out_dir, chunk_size=512):
+def process_dem_in_chunks(dem_path, out_dir, chunk_size=512, state_prefix=None):
     """
     Processes real DEM in chunked windows with 1-pixel overlap padding to compute terrain features:
     - slope (degrees)
@@ -82,11 +82,12 @@ def process_dem_in_chunks(dem_path, out_dir, chunk_size=512):
         meta = src.meta.copy()
         meta.update(dtype=rasterio.float32, nodata=-9999.0)
 
+        prefix = f"{state_prefix}_" if state_prefix else "real_"
         out_paths = {
-            "slope": f"{out_dir}/real_slope.tif",
-            "aspect": f"{out_dir}/real_aspect.tif",
-            "roughness": f"{out_dir}/real_roughness.tif",
-            "tpi": f"{out_dir}/real_tpi.tif"
+            "slope": f"{out_dir}/{prefix}slope.tif",
+            "aspect": f"{out_dir}/{prefix}aspect.tif",
+            "roughness": f"{out_dir}/{prefix}roughness.tif",
+            "tpi": f"{out_dir}/{prefix}tpi.tif"
         }
 
         # Initialize output rasters

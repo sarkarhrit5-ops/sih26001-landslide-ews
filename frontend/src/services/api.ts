@@ -1,5 +1,5 @@
 /**
- * API Service Layer for SIH26001 Landslide Early Warning System
+ * API Service Layer for SIH 2026 Landslide Early Warning System
  * Interfaces cleanly with FastAPI backend endpoints.
  */
 
@@ -75,6 +75,29 @@ export interface SystemHealthResponse {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
+export interface StateValidationReport {
+  id?: string;
+  state_id?: string;
+  state: string;
+  state_name?: string;
+  processing_status?: string;
+  validation_status?: string;
+  rainfall_source?: string;
+  rainfall_status: string;
+  inventory_events: number;
+  usable_events: number;
+  spatial_quality: string;
+  temporal_quality: string;
+  dem_status: string;
+  exposure_status: string;
+  model_status: string;
+  validation_metrics: Record<string, any>;
+  risk_result?: any;
+  overall_status: string;
+  blocking_reasons: string[];
+  error?: string | null;
+}
+
 class ApiService {
   private async fetchJson<T>(endpoint: string): Promise<T> {
     try {
@@ -108,6 +131,10 @@ class ApiService {
 
   async getExposureAlerts(): Promise<ExposureAlertsResponse> {
     return this.fetchJson<ExposureAlertsResponse>('/api/v1/exposure/alerts');
+  }
+
+  async getValidationStatus(): Promise<StateValidationReport[]> {
+    return this.fetchJson<StateValidationReport[]>('/api/v1/validation/status');
   }
 }
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import type { GridCell, NERState } from '../../data/mockCells';
-import { EAST_SIKKIM_CELLS, NER_STATES, NER_BOUNDS } from '../../data/mockCells';
+import { EAST_SIKKIM_CELLS, NER_BOUNDS } from '../../data/mockCells';
 import type { WarningLevel } from '../../services/api';
 import { AlertTriangle, Info } from 'lucide-react';
 
@@ -16,6 +16,7 @@ export interface MapLayersState {
 interface LandslideMapProps {
   selectedState: NERState | null; // null means "All Northeast India"
   selectedCell: GridCell | null;
+  states: NERState[];
   onSelectCell: (cell: GridCell | null) => void;
   onSelectState: (state: NERState | null) => void;
   layers: MapLayersState;
@@ -24,6 +25,7 @@ interface LandslideMapProps {
 export const LandslideMap: React.FC<LandslideMapProps> = ({
   selectedState,
   selectedCell,
+  states,
   onSelectCell,
   onSelectState,
   layers
@@ -81,59 +83,74 @@ export const LandslideMap: React.FC<LandslideMapProps> = ({
     layerGroup.clearLayers();
 
     // 1. Render All 8 NER State Labels as compact rounded boxes
-    NER_STATES.forEach((st) => {
-      const isPilot = st.hasValidatedPilot;
+    states.forEach((st) => {
+      let labelColor = '#94a3b8';
+      let borderColor = '#475569';
+      let background = 'rgba(100,116,139,0.12)';
+      let subtext = '';
 
-      const iconHtml = isPilot
-        ? `<div style="
-                background:rgba(16,185,129,0.12);
-                border:1.5px solid #10b981;
-                border-radius:4px;
-                padding:2px 6px;
-                text-align:center;
-                pointer-events:auto;
-                cursor:pointer;
-                white-space:nowrap;
-                box-shadow:0 1px 4px rgba(0,0,0,0.4);
-              ">
-             <div style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;color:#34d399;
-                         letter-spacing:0.3px;">${st.name}</div>
-             <div style="font-family:ui-monospace,monospace;font-size:7px;color:#a7f3d0;text-transform:uppercase;
-                         letter-spacing:0.6px;margin-top:1px;">validated pilot</div>
-           </div>`
-        : `<div style="
-                background:rgba(100,116,139,0.12);
-                border:1px solid #475569;
-                border-radius:4px;
-                padding:2px 6px;
-                text-align:center;
-                pointer-events:auto;
-                cursor:pointer;
-                white-space:nowrap;
-                box-shadow:0 1px 3px rgba(0,0,0,0.3);
-              ">
-             <span style="font-family:ui-monospace,monospace;font-size:10px;color:#94a3b8;
-                          letter-spacing:0.2px;">${st.name}</span>
-           </div>`;
+      if (st.status === 'VALIDATED_PILOT' || st.status === 'COMPLETED') {
+        labelColor = '#34d399';
+        borderColor = '#10b981';
+        background = 'rgba(16,185,129,0.12)';
+        subtext = 'validated pilot';
+      } else if (st.status === 'PROCESSING') {
+        labelColor = '#60a5fa';
+        borderColor = '#3b82f6';
+        background = 'rgba(59,130,246,0.12)';
+        subtext = 'processing';
+      } else if (st.status === 'DATA_UNAVAILABLE') {
+        labelColor = '#fbbf24';
+        borderColor = '#d97706';
+        background = 'rgba(245,158,11,0.12)';
+        subtext = 'data unavailable';
+      } else if (st.status === 'INSUFFICIENT_DATA') {
+        labelColor = '#f59e0b';
+        borderColor = '#d97706';
+        background = 'rgba(245,158,11,0.12)';
+        subtext = 'insufficient data';
+      } else if (st.status === 'ERROR') {
+        labelColor = '#f87171';
+        borderColor = '#ef4444';
+        background = 'rgba(239,68,68,0.12)';
+        subtext = 'error';
+      } else {
+        subtext = 'pending';
+      }
+
+      const subtextHtml = subtext 
+        ? `<div style="font-family:ui-monospace,monospace;font-size:7px;color:${labelColor};text-transform:uppercase;
+                     letter-spacing:0.6px;margin-top:1px;">${subtext}</div>`
+        : '';
+
+      const iconHtml = `<div style="
+              background:${background};
+              border:1.5px solid ${borderColor};
+              border-radius:4px;
+              padding:2px 6px;
+              text-align:center;
+              pointer-events:auto;
+              cursor:pointer;
+              white-space:nowrap;
+              box-shadow:0 1px 4px rgba(0,0,0,0.4);
+            ">
+           <div style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;color:${labelColor};
+                       letter-spacing:0.3px;">${st.name}</div>
+           ${subtextHtml}
+         </div>`;
 
       const customIcon = L.divIcon({
         html: iconHtml,
         className: 'custom-state-label-icon',
-        iconSize: isPilot ? [80, 26] : [70, 16],
-        iconAnchor: isPilot ? [40, 13] : [35, 8]
+        iconSize: [85, 28],
+        iconAnchor: [42, 14]
       });
 
       const marker = L.marker([st.lat, st.lon], { icon: customIcon });
 
-      const tooltipContent = isPilot
-        ? `<div style="font-family:ui-monospace,monospace;font-size:11px;line-height:1.6;">
-             <strong style="color:#f1f5f9;">Sikkim</strong><br/>
-             <span style="color:#34d399;font-size:10px;">Status: Validated Pilot</span><br/>
-             <span style="color:#94a3b8;font-size:10px;">Pilot: East Sikkim</span>
-           </div>`
-        : `<div style="font-family:ui-monospace,monospace;font-size:11px;line-height:1.6;">
+      const tooltipContent = `<div style="font-family:ui-monospace,monospace;font-size:11px;line-height:1.6;">
              <strong style="color:#f1f5f9;">${st.name}</strong><br/>
-             <span style="color:#94a3b8;font-size:10px;">Status: Validation Pending</span>
+             <span style="color:${labelColor};font-size:10px;">Status: ${st.statusLabel}</span>
            </div>`;
 
       marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -6], opacity: 0.95 });
@@ -143,7 +160,7 @@ export const LandslideMap: React.FC<LandslideMapProps> = ({
 
     // 2. Map Modes Rendering
     if (layers.primary === 'risk') {
-      EAST_SIKKIM_CELLS.forEach((cell) => {
+      EAST_SIKKIM_CELLS.filter(cell => !selectedState || cell.stateId === selectedState.id).forEach((cell) => {
         const isSelected = selectedCell?.id === cell.id;
         const color = getCellColor(cell.warningLevel);
 
@@ -169,7 +186,7 @@ export const LandslideMap: React.FC<LandslideMapProps> = ({
         polygon.addTo(layerGroup);
       });
     } else if (layers.primary === 'susceptibility') {
-      EAST_SIKKIM_CELLS.forEach((cell) => {
+      EAST_SIKKIM_CELLS.filter(cell => !selectedState || cell.stateId === selectedState.id).forEach((cell) => {
         const isSelected = selectedCell?.id === cell.id;
         const color = getSusceptibilityColor(cell.susceptibility);
 
@@ -193,7 +210,7 @@ export const LandslideMap: React.FC<LandslideMapProps> = ({
         polygon.addTo(layerGroup);
       });
     } else if (layers.primary === 'forecast' && layers.forecastTime === '72h') {
-      EAST_SIKKIM_CELLS.forEach((cell) => {
+      EAST_SIKKIM_CELLS.filter(cell => !selectedState || cell.stateId === selectedState.id).forEach((cell) => {
         const isSelected = selectedCell?.id === cell.id;
         const color = '#3b82f6'; // Blue gradient mapped to rain
 
@@ -218,15 +235,15 @@ export const LandslideMap: React.FC<LandslideMapProps> = ({
       });
     } else if (layers.primary === 'exposure') {
       const infraPoints = [
-        { lat: 27.33, lon: 88.61, name: 'STNM Central Hospital Gangtok (Sikkim)', type: 'hospital' },
-        { lat: 27.15, lon: 88.50, name: 'NH10 Teesta Valley Corridor (Sikkim-WB)', type: 'road' },
-        { lat: 27.39, lon: 88.52, name: 'Dikchu Hydro Feeder Bridge (Sikkim)', type: 'bridge' },
-        { lat: 27.24, lon: 88.59, name: 'Pakyong Airport Approach (Sikkim)', type: 'road' },
-        { lat: 26.18, lon: 91.75, name: 'Guwahati Dispur Transport Axis (Assam)', type: 'road' },
-        { lat: 25.57, lon: 91.88, name: 'Shillong Bypass Corridor (Meghalaya)', type: 'road' }
+        { lat: 27.33, lon: 88.61, name: 'STNM Central Hospital Gangtok (Sikkim)', type: 'hospital', stateId: 'sikkim' },
+        { lat: 27.15, lon: 88.50, name: 'NH10 Teesta Valley Corridor (Sikkim-WB)', type: 'road', stateId: 'sikkim' },
+        { lat: 27.39, lon: 88.52, name: 'Dikchu Hydro Feeder Bridge (Sikkim)', type: 'bridge', stateId: 'sikkim' },
+        { lat: 27.24, lon: 88.59, name: 'Pakyong Airport Approach (Sikkim)', type: 'road', stateId: 'sikkim' },
+        { lat: 26.18, lon: 91.75, name: 'Guwahati Dispur Transport Axis (Assam)', type: 'road', stateId: 'assam' },
+        { lat: 25.57, lon: 91.88, name: 'Shillong Bypass Corridor (Meghalaya)', type: 'road', stateId: 'meghalaya' }
       ];
 
-      infraPoints.forEach((pt) => {
+      infraPoints.filter(pt => !selectedState || pt.stateId === selectedState.id).forEach((pt) => {
         const iconHtml = pt.type === 'hospital'
           ? '<div style="background:#ef4444; width:10px; height:10px; border-radius:50%; border:2px solid #fff;"></div>'
           : '<div style="background:#3b82f6; width:8px; height:8px; border-radius:50%; border:1px solid #fff;"></div>';
@@ -243,13 +260,13 @@ export const LandslideMap: React.FC<LandslideMapProps> = ({
       });
     } else if (layers.primary === 'events') {
       const glcEvents = [
-        { lat: 27.478, lon: 88.527, date: '2009-07-01', trigger: 'downpour' },
-        { lat: 27.593, lon: 88.492, date: '2016-08-16', trigger: 'rain' },
-        { lat: 27.838, lon: 88.556, date: '2012-09-19', trigger: 'continuous_rain' },
-        { lat: 27.021, lon: 88.259, date: '2017-07-06', trigger: 'downpour' }
+        { lat: 27.478, lon: 88.527, date: '2009-07-01', trigger: 'downpour', stateId: 'sikkim' },
+        { lat: 27.593, lon: 88.492, date: '2016-08-16', trigger: 'rain', stateId: 'sikkim' },
+        { lat: 27.838, lon: 88.556, date: '2012-09-19', trigger: 'continuous_rain', stateId: 'sikkim' },
+        { lat: 27.021, lon: 88.259, date: '2017-07-06', trigger: 'downpour', stateId: 'sikkim' }
       ];
 
-      glcEvents.forEach((ev) => {
+      glcEvents.filter(ev => !selectedState || ev.stateId === selectedState.id).forEach((ev) => {
         const iconHtml = '<div style="background:#f59e0b; width:7px; height:7px; transform:rotate(45deg); border:1px solid #000;"></div>';
         const customIcon = L.divIcon({
           html: iconHtml,

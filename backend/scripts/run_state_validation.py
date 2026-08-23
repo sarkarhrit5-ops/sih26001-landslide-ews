@@ -4,13 +4,17 @@ import json
 import psutil
 import pandas as pd
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.core.config_states import NER_STATES_CONFIG
 from app.services.state_validation import (
+    process_state,
     evaluate_landslide_inventory,
     evaluate_terrain_data,
-    evaluate_rainfall_status,
+    evaluate_state_rainfall,
     evaluate_exposure_data,
     determine_overall_status
 )
@@ -34,49 +38,42 @@ def run_validation_pipeline():
     glc_df = pd.read_csv(glc_path)
     peak_ram.append(print_ram("After GLC Load"))
     
-    rainfall_status = evaluate_rainfall_status()
-    print(f"Rainfall (IMERG) Status: {rainfall_status}")
-    
     report = []
     
-    print("\nStarting State Validation Pipeline...\n" + "="*50)
+    print("\n[PIPELINE] Starting Northeast India processing\n")
+    processed_count = 0
     for state_name, config in NER_STATES_CONFIG.items():
-        print(f"Evaluating {state_name}...")
-        
-        # A. Landslide Inventory
-        inventory = evaluate_landslide_inventory(config, glc_df)
-        
-        # B. Terrain
-        terrain = evaluate_terrain_data(state_name, config)
-        
-        # C. Exposure
-        exposure = evaluate_exposure_data(state_name, config)
-        
-        # E. Determine Status
-        status_info = determine_overall_status(
-            state_name, inventory, terrain, rainfall_status, exposure, config.get("is_pilot", False)
-        )
-        
-        state_report = {
-            "state": state_name,
-            "inventory_events": inventory["inventory_events"],
-            "usable_events": inventory["usable_events"],
-            "spatial_quality": inventory["spatial_quality"],
-            "temporal_quality": inventory["temporal_quality"],
-            "dem_status": terrain,
-            "rainfall_status": rainfall_status,
-            "exposure_status": exposure,
-            "model_status": status_info["model_status"],
-            "validation_metrics": status_info["validation_metrics"],
-            "overall_status": status_info["overall_status"],
-            "blocking_reasons": status_info["blocking_reasons"]
-        }
-        
+        try:
+            state_report = process_state(state_name, config, glc_df)
+        except Exception as exc:
+            print(f"[STATE] Error processing {state_name}: {exc}")
+            state_id = config.get("id", state_name.lower().replace(" ", "_"))
+            state_report = {
+                "id": state_id,
+                "state_id": state_id,
+                "state": state_name,
+                "state_name": state_name,
+                "processing_status": "ERROR",
+                "validation_status": "ERROR",
+                "overall_status": "ERROR",
+                "rainfall_source": "None",
+                "rainfall_status": "Error",
+                "inventory_events": 0,
+                "usable_events": 0,
+                "spatial_quality": "Poor",
+                "temporal_quality": "Poor",
+                "dem_status": "Missing",
+                "exposure_status": "Missing",
+                "model_status": "Error",
+                "validation_metrics": {},
+                "risk_result": None,
+                "blocking_reasons": [f"Processing failed: {str(exc)}"],
+                "error": str(exc)
+            }
+            print(f"[STATE] {state_name} completed")
+            
         report.append(state_report)
-        print(f"  -> Usable Events: {inventory['usable_events']}")
-        print(f"  -> Status: {status_info['overall_status']}")
-        if status_info["blocking_reasons"]:
-            print(f"  -> Blockers: {', '.join(status_info['blocking_reasons'])}")
+        processed_count += 1
             
     # Save Report
     out_dir = os.path.join(os.path.dirname(__file__), "..", "data", "processed")
@@ -87,16 +84,15 @@ def run_validation_pipeline():
         json.dump(report, f, indent=2)
         
     peak_ram.append(print_ram("Final"))
-    max_ram = max(peak_ram)
     
-    print("\n" + "="*50 + "\nVALIDATION PIPELINE COMPLETE")
-    print(f"Report saved to: {out_path}")
-    print("\nSUMMARY:")
-    for r in report:
-        print(f"{r['state']:20s} : {r['overall_status']}")
-        
-    print(f"\nPeak RAM Usage: {max_ram:.2f} MB (Constraint: 8000 MB)")
-    print("8 GB RAM Constraint Met: YES" if max_ram < 8000 else "8 GB RAM Constraint Met: NO")
+    print(f"\n[PIPELINE] {processed_count}/8 states processed\n")
+    
+    print("[SUMMARY]")
+    for item in report:
+        st_name = item.get("state_name", item.get("state"))
+        st_status = item.get("overall_status", item.get("validation_status"))
+        print(f"{st_name:<20} {st_status}")
     
 if __name__ == "__main__":
     run_validation_pipeline()
+
