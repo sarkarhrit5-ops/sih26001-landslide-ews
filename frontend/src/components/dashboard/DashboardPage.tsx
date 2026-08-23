@@ -4,6 +4,7 @@ import type { MapLayersState } from './LandslideMap';
 import { IntelligencePanel } from './IntelligencePanel';
 import { BottomInfoStrip } from './BottomInfoStrip';
 import { LayerControl } from './LayerControl';
+import type { PrimaryLayer, ForecastTime } from './LandslideMap';
 import type { GridCell, NERState } from '../../data/mockCells';
 import { NER_STATES } from '../../data/mockCells';
 import { MapPin, ArrowLeft, Radio, Layers, ChevronDown } from 'lucide-react';
@@ -18,15 +19,16 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
   const [showLayerControl, setShowLayerControl] = useState<boolean>(false);
 
   const [layers, setLayers] = useState<MapLayersState>({
-    riskOverlay: true,
-    terrainContours: false,
-    rainfallHeatmap: false,
-    infrastructure: true,
-    landslideEvents: true
+    primary: 'risk',
+    forecastTime: '24h'
   });
 
-  const handleToggleLayer = (key: keyof MapLayersState) => {
-    setLayers((prev) => ({ ...prev, [key]: !prev[key] }));
+  const handleChangeLayer = (layer: PrimaryLayer) => {
+    setLayers((prev) => ({ ...prev, primary: layer }));
+  };
+
+  const handleChangeForecastTime = (time: ForecastTime) => {
+    setLayers((prev) => ({ ...prev, forecastTime: time }));
   };
 
   const handleStateSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -115,7 +117,11 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigateToLandin
         {/* Layer Control Dropdown Panel */}
         {showLayerControl && (
           <div className="absolute top-5 left-5 z-[500] w-64 shadow-2xl">
-            <LayerControl layers={layers} onToggleLayer={handleToggleLayer} />
+            <LayerControl 
+              layers={layers} 
+              onChangeLayer={handleChangeLayer} 
+              onChangeForecastTime={handleChangeForecastTime}
+            />
           </div>
         )}
 
