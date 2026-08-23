@@ -1,0 +1,156 @@
+[
+  {
+    "state": "Sikkim",
+    "inventory_events": 82,
+    "usable_events": 82,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Available",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Available (Mock/Local)",
+    "model_status": "Trained & Validated",
+    "validation_metrics": {
+      "PR-AUC": 0.7762,
+      "ROC-AUC": 0.919,
+      "False Alarm Rate": 0.0317,
+      "Precision": 0.7778,
+      "Recall": 0.3684,
+      "F1": 0.5,
+      "Spatial Coverage": "East Sikkim",
+      "Class Balance": "3:1 (Negative:Positive)"
+    },
+    "overall_status": "VALIDATED",
+    "blocking_reasons": [
+      "Missing Earthdata Credentials for IMERG"
+    ]
+  },
+  {
+    "state": "Arunachal Pradesh",
+    "inventory_events": 88,
+    "usable_events": 88,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Missing (Requires Download)",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Missing (Requires Download)",
+    "model_status": "Not Trained",
+    "validation_metrics": {},
+    "overall_status": "DATA UNAVAILABLE",
+    "blocking_reasons": [
+      "Missing DEM Data",
+      "Missing Earthdata Credentials for IMERG",
+      "Missing OSM Exposure Data"
+    ]
+  },
+  {
+    "state": "Assam",
+    "inventory_events": 401,
+    "usable_events": 401,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Missing (Requires Download)",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Missing (Requires Download)",
+    "model_status": "Not Trained",
+    "validation_metrics": {},
+    "overall_status": "DATA UNAVAILABLE",
+    "blocking_reasons": [
+      "Missing DEM Data",
+      "Missing Earthdata Credentials for IMERG",
+      "Missing OSM Exposure Data"
+    ]
+  },
+  {
+    "state": "Manipur",
+    "inventory_events": 128,
+    "usable_events": 128,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Missing (Requires Download)",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Missing (Requires Download)",
+    "model_status": "Not Trained",
+    "validation_metrics": {},
+    "overall_status": "DATA UNAVAILABLE",
+    "blocking_reasons": [
+      "Missing DEM Data",
+      "Missing Earthdata Credentials for IMERG",
+      "Missing OSM Exposure Data"
+    ]
+  },
+  {
+    "state": "Meghalaya",
+    "inventory_events": 47,
+    "usable_events": 47,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Missing (Requires Download)",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Missing (Requires Download)",
+    "model_status": "Not Trained",
+    "validation_metrics": {},
+    "overall_status": "DATA UNAVAILABLE",
+    "blocking_reasons": [
+      "Missing DEM Data",
+      "Missing Earthdata Credentials for IMERG",
+      "Missing OSM Exposure Data",
+      "Insufficient usable landslide events (47 < 50)"
+    ]
+  },
+  {
+    "state": "Mizoram",
+    "inventory_events": 48,
+    "usable_events": 48,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Missing (Requires Download)",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Missing (Requires Download)",
+    "model_status": "Not Trained",
+    "validation_metrics": {},
+    "overall_status": "DATA UNAVAILABLE",
+    "blocking_reasons": [
+      "Missing DEM Data",
+      "Missing Earthdata Credentials for IMERG",
+      "Missing OSM Exposure Data",
+      "Insufficient usable landslide events (48 < 50)"
+    ]
+  },
+  {
+    "state": "Nagaland",
+    "inventory_events": 110,
+    "usable_events": 110,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Missing (Requires Download)",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Missing (Requires Download)",
+    "model_status": "Not Trained",
+    "validation_metrics": {},
+    "overall_status": "DATA UNAVAILABLE",
+    "blocking_reasons": [
+      "Missing DEM Data",
+      "Missing Earthdata Credentials for IMERG",
+      "Missing OSM Exposure Data"
+    ]
+  },
+  {
+    "state": "Tripura",
+    "inventory_events": 11,
+    "usable_events": 11,
+    "spatial_quality": "Moderate/Poor",
+    "temporal_quality": "Good",
+    "dem_status": "Missing (Requires Download)",
+    "rainfall_status": "Unauthenticated (Missing Credentials)",
+    "exposure_status": "Missing (Requires Download)",
+    "model_status": "Not Trained",
+    "validation_metrics": {},
+    "overall_status": "DATA UNAVAILABLE",
+    "blocking_reasons": [
+      "Missing DEM Data",
+      "Missing Earthdata Credentials for IMERG",
+      "Missing OSM Exposure Data",
+      "Insufficient usable landslide events (11 < 50)"
+    ]
+  }
+]
