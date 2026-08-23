@@ -1,0 +1,131 @@
+{
+  "record_type": "east_sikkim_reproduction_ATTEMPT",
+  "scientific_status": "BLOCKED",
+  "generated_at_local": "2026-08-23T18:43 Asia/Kolkata (observed session time)",
+  "aoi": {
+    "name": "East Sikkim pilot",
+    "min_lat": 27.0,
+    "max_lat": 28.1,
+    "min_lon": 88.0,
+    "max_lon": 88.9,
+    "source": "backend/scripts/train_real_models.py"
+  },
+  "step1_real_landslides": {
+    "dataset": "NASA Global Landslide Catalog (GLC) legacy export",
+    "file": "backend/data/raw/glc_legacy.csv",
+    "catalog_total_rows": 11033,
+    "events_in_aoi_raw": 82,
+    "events_with_usable_date": 82,
+    "events_unparseable_date": 0,
+    "usable_events_after_dedup": 82,
+    "duplicate_rows_removed": 0,
+    "independent_event_dates": 72,
+    "date_range": [
+      "2007-04-11 00:00:00",
+      "2017-07-10 12:55:00"
+    ],
+    "spatial_uncertainty_location_accuracy": {
+      "5km": 22,
+      "25km": 17,
+      "1km": 16,
+      "10km": 14,
+      "50km": 8,
+      "exact": 2,
+      "unknown": 2,
+      "100km": 1
+    },
+    "pct_events_uncertainty_ge_5km_pipeline_heuristic": 78.0,
+    "note": "Positives are reproducible from the real CSV. Matches audit (82 events, ~78% >=5km).",
+    "status": "COMPLETED (real data, no fabrication)"
+  },
+  "blockers": {
+    "B1_no_internet_egress": {
+      "detail": "DNS resolution FAILS for archive-api.open-meteo.com, copernicus-dem-30m.s3.amazonaws.com, pypi.org. TCP:443 unreachable. pip finds no distributions ('from versions: none').",
+      "blocks": [
+        "Step2 DEM download (Copernicus GLO-30 S3)",
+        "Step3 rainfall (Open-Meteo ERA5 archive)",
+        "package installation"
+      ]
+    },
+    "B2_no_scientific_packages": {
+      "detail": "Missing and non-installable: rasterio, geopandas, scikit-learn, lightgbm, pyarrow, xarray, shap, joblib, scipy, fastapi, pytest, httpx.",
+      "blocks": [
+        "DEM/terrain processing",
+        "model training",
+        "parquet read/write",
+        "backend import",
+        "test execution"
+      ]
+    },
+    "B3_no_earthdata_credentials": {
+      "detail": "EARTHDATA_TOKEN / EARTHDATA_USERNAME / EARTHDATA_PASSWORD all unset.",
+      "blocks": [
+        "NASA IMERG rainfall path"
+      ]
+    },
+    "B4_no_dem_or_model_on_disk": {
+      "detail": "0 .tif DEM files, 0 model artifacts (.joblib/.pkl), 0 NetCDF in repo.",
+      "blocks": [
+        "cannot skip download using cached raster; nothing to sample terrain from"
+      ]
+    },
+    "B5_existing_parquet_unreadable": {
+      "detail": "backend/data/processed/training_matrix.parquet (81KB) cannot be read: no pyarrow/fastparquet engine available and none installable.",
+      "blocks": [
+        "Step9 verification of existing training matrix"
+      ]
+    },
+    "B6_sandbox_ram": {
+      "detail": "This sandbox has ~3.82 GiB RAM (target laptop is 8GB). Not the primary blocker, but full-AOI DEM processing could not be exercised here anyway."
+    }
+  },
+  "environment": {
+    "python": "3.10.12",
+    "ram_total_gib": 3.82,
+    "packages_present": {
+      "numpy": "2.2.6",
+      "pandas": "2.3.3",
+      "requests": "2.34.2",
+      "psutil": "7.2.2"
+    },
+    "packages_missing": [
+      "rasterio",
+      "geopandas",
+      "sklearn",
+      "lightgbm",
+      "pyarrow",
+      "fastparquet",
+      "xarray",
+      "shap",
+      "joblib",
+      "scipy",
+      "fastapi",
+      "uvicorn",
+      "pydantic",
+      "httpx",
+      "pytest"
+    ]
+  },
+  "steps_not_performed_and_why": {
+    "step2_dem": "BLOCKED (B1,B2,B4)",
+    "step3_rainfall": "BLOCKED (B1,B3). Refused to accept the code's all-zeros exception fallback as 'real' rainfall.",
+    "step4_landcover": "BLOCKED (depends on DEM elevation raster).",
+    "step5_feature_matrix": "BLOCKED (depends on DEM+rainfall).",
+    "step6_negative_sampling": "BLOCKED (depends on feature matrix + terrain rasters).",
+    "step7_training": "BLOCKED (B2 + no features).",
+    "step8_option_ac_decision": "NOT RUN on reproduced results (no results to decide on).",
+    "step9_persist_artifacts": "NOT DONE (no model/metrics to persist; would not create empty/misleading artifacts).",
+    "step10_remove_false_validation": "NOT APPLIED YET (code edit; cannot run backend/pytest here to verify. Awaiting user decision.)",
+    "step11_peak_ram": "NOT MEASURED (pipeline did not run).",
+    "step12_tests": "NOT ADDED YET (cannot execute pytest here to verify)."
+  },
+  "safety_assertions": {
+    "fabricated_rainfall": false,
+    "fabricated_dem": false,
+    "fabricated_metrics": false,
+    "copied_old_hardcoded_metrics_0p7762_0p9190": false,
+    "ran_run_validation_py": false,
+    "substituted_synthetic_data": false,
+    "modified_any_repo_file": false
+  }
+}
