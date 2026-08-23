@@ -83,22 +83,25 @@ def fetch_open_meteo_forecast(lat: float, lon: float, hours: int = 72):
     
     return cumulative
 
-def fetch_imerg_precipitation(bounds: dict, date: datetime, run_type="Early"):
-    """
-    Fetches NASA GPM IMERG satellite rainfall data via Earthdata OPeNDAP or GES DISC HTTPS.
-    Supports:
-    - IMERG Final (run_type="Final") for historical research/training
-    - IMERG Early/Late (run_type="Early" or "Late") for near-real-time functionality
+import xarray as xr
+import tempfile
 
-    Requires Earthdata authentication via environment variables (EARTHDATA_USERNAME & EARTHDATA_PASSWORD or EARTHDATA_TOKEN).
-    If authentication fails, reports the exact error and halts (does NOT substitute synthetic data).
+def get_imerg_indices(bounds: dict):
     """
-    # 1. Authenticate with NASA Earthdata
-    session = get_earthdata_session()
-    
-    print(f"Fetching NASA GPM IMERG {run_type} run for {date.strftime('%Y-%m-%d')}...")
-    
-    # Construct IMERG GES DISC URL based on run_type
+    Converts lat/lon bounds to IMERG grid indices.
+    IMERG grid: lat is -89.95 to 89.95 (1800 cells), lon is -179.95 to 179.95 (3600 cells).
+    """
+    lat_min_idx = max(0, int(round((bounds['min_lat'] + 89.95) * 10)))
+    lat_max_idx = min(1799, int(round((bounds['max_lat'] + 89.95) * 10)))
+    lon_min_idx = max(0, int(round((bounds['min_lon'] + 179.95) * 10)))
+    lon_max_idx = min(3599, int(round((bounds['max_lon'] + 179.95) * 10)))
+    return lat_min_idx, lat_max_idx, lon_min_idx, lon_max_idx
+
+def _fetch_imerg_day(session: requests.Session, date: datetime, bounds: dict, run_type: str = "Early") -> float:
+    """
+    Fetches a single day's IMERG precipitation for a specific bounding box using OPeNDAP.
+    Returns the mean precipitation in mm for the bounding box.
+    """
     year = date.strftime("%Y")
     month = date.strftime("%m")
     day = date.strftime("%d")
@@ -113,26 +116,73 @@ def fetch_imerg_precipitation(bounds: dict, date: datetime, run_type="Early"):
         product = "GPM_3IMERGDE.07"
         filename = f"3B-DAY-E.MS.MRG.3IMERG.{year}{month}{day}-S000000-E235959.V07B.nc4"
         
-    url = f"https://gpm1.gesdisc.eosdis.nasa.gov/data/GPM_L3/{product}/{year}/{month}/{filename}"
+    base_url = f"https://gpm1.gesdisc.eosdis.nasa.gov/opendap/GPM_L3/{product}/{year}/{month}/{filename}"
+    
+    lat_min, lat_max, lon_min, lon_max = get_imerg_indices(bounds)
+    
+    # OPeNDAP constraint query: var[time][lon][lat]
+    # IMERG dimensions: time (1), lon (3600), lat (1800)
+    query = f"?precipitationCal[0:0][{lon_min}:{lon_max}][{lat_min}:{lat_max}]"
+    url = f"{base_url}.nc4{query}"
     
     try:
         resp = session.get(url, timeout=30)
-        if resp.status_code == 401 or resp.status_code == 403:
+        if resp.status_code in [401, 403]:
             raise PermissionError(f"EARTHDATA AUTHENTICATION REJECTED (HTTP {resp.status_code}) for URL {url}")
         resp.raise_for_status()
         
-        # Parse NC4 file data if fetched successfully
-        return {
-            "source": f"IMERG_{run_type}",
-            "date": date,
-            "status": "success",
-            "url": url,
-            "bytes_downloaded": len(resp.content)
-        }
-    except Exception as e:
+        # Save tiny subset to a temporary file for xarray parsing to keep RAM usage low
+        with tempfile.NamedTemporaryFile(suffix=".nc4", delete=False) as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+            
+        try:
+            # Parse NetCDF4 using xarray
+            with xr.open_dataset(tmp_path, engine="h5netcdf") as ds:
+                # Extract mean precipitation across the requested bounding box
+                mean_precip = float(ds['precipitationCal'].mean().values)
+        finally:
+            os.remove(tmp_path)
+            
+        return max(0.0, mean_precip) # Ensure no negative values from fill data anomalies
+        
+    except requests.RequestException as e:
         raise RuntimeError(f"EARTHDATA IMERG FETCH FAILED for {date.strftime('%Y-%m-%d')} ({run_type}): {str(e)}")
 
+def fetch_imerg_precipitation(bounds: dict, date: datetime, run_type="Early", windows=[1, 3, 7]):
+    """
+    Fetches NASA GPM IMERG satellite rainfall data via Earthdata OPeNDAP subsetting.
+    Supports 1, 3, and 7-day accumulations.
+    Maintains 8GB RAM constraint by utilizing spatial subsetting on the server side.
+    
+    Requires Earthdata authentication via environment variables (EARTHDATA_USERNAME & EARTHDATA_PASSWORD or EARTHDATA_TOKEN).
+    If authentication fails, reports the exact error and halts (does NOT substitute synthetic data).
+    """
+    session = get_earthdata_session()
+    
+    max_days = max(windows)
+    daily_precip = {}
+    
+    # Fetch historical daily data up to the maximum window
+    for d in range(max_days):
+        target_date = date - timedelta(days=d)
+        daily_precip[d] = _fetch_imerg_day(session, target_date, bounds, run_type)
+        
+    # Aggregate according to requested windows
+    results = {}
+    for w in windows:
+        accum = sum(daily_precip[d] for d in range(w))
+        results[f"accumulation_{w}d_mm"] = round(accum, 4)
+        
+    return {
+        "source": f"IMERG_{run_type}",
+        "target_date": date.strftime("%Y-%m-%d"),
+        "status": "success",
+        "accumulations": results,
+        "spatial_bounds": bounds
+    }
+
 if __name__ == "__main__":
-    forecast = fetch_open_meteo_forecast(27.3314, 88.6138, 24) # Gangtok
+    forecast = fetch_open_meteo_forecast(27.3314, 88.6138, 24)
     print(f"24h Forecast Precipitation: {forecast} mm")
 
