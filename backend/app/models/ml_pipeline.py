@@ -6,16 +6,33 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_score, recall_score, f1_score, confusion_matrix
 
+# Descriptive, static metadata about the modeling APPROACH. These are design
+# facts (what kind of model is used, which features feed it, how negative
+# samples and holdouts are constructed) -- NOT a claim that a validated model is
+# currently trained, persisted, or runnable. Runtime validation status is gated
+# separately on real persisted evidence (see
+# app.services.state_validation.load_validation_evidence).
 STATIC_MODEL_METADATA = {
     "model_types": ["LightGBMClassifier", "RandomForestClassifier"],
     "features_used": ["elevation", "slope", "aspect", "roughness", "tpi", "land_cover_class"],
     "negative_sampling": "Spatially buffered random points (>= 0.05 deg / 5 km buffer, 3:1 ratio)",
     "spatial_holdout_strategy": "Latitude median split (South vs North East Sikkim)",
+    "calibration_note": "Score is a relative terrain susceptibility index (0.0 - 1.0), not a calibrated absolute probability."
+}
+
+# HISTORICAL / DOCUMENTARY ONLY -- performance figures reported from a prior
+# offline development run. These are NOT loaded from a persisted validation
+# artifact, are NOT reproducible from anything currently in this repository, and
+# MUST NOT be presented as the result of a current validation run or used to
+# grant VALIDATED_PILOT status. They are retained (not deleted) purely so the
+# historical numbers are not silently lost; the authoritative, current metrics
+# can only come from a persisted metrics.json produced by a real validation run.
+DOCUMENTARY_REFERENCE_METRICS = {
+    "provenance": "Reported from a prior offline development run; not reproducible from this repository. Documentary only -- not current validation evidence.",
     "temporal_holdout_metrics": {
         "LightGBM": {"PR-AUC": 0.7762, "ROC-AUC": 0.9190, "False Alarm Rate": 0.0317, "Precision": 0.7778, "Recall": 0.3684, "F1": 0.5000},
         "RandomForest": {"PR-AUC": 0.7792, "ROC-AUC": 0.9319, "False Alarm Rate": 0.0476, "Precision": 0.7500, "Recall": 0.4737, "F1": 0.5806}
-    },
-    "calibration_note": "Score is a relative terrain susceptibility index (0.0 - 1.0), not a calibrated absolute probability."
+    }
 }
 
 def generate_spatial_negative_samples(positive_df: pd.DataFrame, dem_bounds: dict, count_ratio: int = 3, buffer_deg: float = 0.05) -> pd.DataFrame:

@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import pytest
 
@@ -7,7 +8,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.models.ml_pipeline import (
     dynamic_risk_module,
     calculate_warning_level,
-    STATIC_MODEL_METADATA
+    STATIC_MODEL_METADATA,
+    DOCUMENTARY_REFERENCE_METRICS
 )
 
 def test_warning_level_classification():
@@ -45,3 +47,14 @@ def test_static_model_metadata():
     assert "LightGBMClassifier" in STATIC_MODEL_METADATA["model_types"]
     assert "elevation" in STATIC_MODEL_METADATA["features_used"]
     assert "relative terrain susceptibility index" in STATIC_MODEL_METADATA["calibration_note"]
+def test_run_metrics_separated_from_descriptive_metadata():
+    # Descriptive metadata must NOT carry run-derived performance numbers, so it
+    # can never be mistaken for a current validation result.
+    assert "temporal_holdout_metrics" not in STATIC_MODEL_METADATA
+    assert "PR-AUC" not in json.dumps(STATIC_MODEL_METADATA)
+    # The historical figures are preserved (not deleted) but quarantined as
+    # clearly-labelled documentary reference, not current evidence.
+    assert "temporal_holdout_metrics" in DOCUMENTARY_REFERENCE_METRICS
+    assert "provenance" in DOCUMENTARY_REFERENCE_METRICS
+    lgb = DOCUMENTARY_REFERENCE_METRICS["temporal_holdout_metrics"]["LightGBM"]
+    assert "PR-AUC" in lgb and "ROC-AUC" in lgb  # numbers not lost

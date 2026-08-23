@@ -257,13 +257,77 @@ def evaluate_exposure_data(state_name: str, state_config: Dict[str, Any]) -> str
         return "Available"
     return "Missing (Requires Download)"
 
+# ---------------------------------------------------------------------------
+# Persisted validation evidence gate
+# ---------------------------------------------------------------------------
+# A state (including the East Sikkim pilot) may only be reported as
+# VALIDATED_PILOT / "Trained & Validated" when REAL, reproducible validation
+# evidence has been persisted to disk by an actual training/validation run.
+# The minimum evidence contract is three non-empty files in data/models/:
+#   * <state>_model.pkl            -- the trained model artifact
+#   * <state>_metrics.json         -- metrics produced by a real validation run
+#   * <state>_feature_schema.json  -- feature schema / provenance
+# Nothing in this repository fabricates these files; until a genuine run writes
+# them, the gate returns "incomplete" and the caller must fall back to an honest
+# VALIDATION_REQUIRED status. Metrics are ONLY ever read from the persisted
+# metrics.json -- they are never hardcoded.
+REQUIRED_METRIC_KEYS = ("PR-AUC", "ROC-AUC")
+
+def _evidence_paths(state_name: str, base_dir: str = None) -> Dict[str, str]:
+    clean_state_name = state_name.lower().replace(' ', '_')
+    if base_dir is None:
+        base_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "data", "models")
+        )
+    return {
+        "model": os.path.join(base_dir, f"{clean_state_name}_model.pkl"),
+        "metrics": os.path.join(base_dir, f"{clean_state_name}_metrics.json"),
+        "schema": os.path.join(base_dir, f"{clean_state_name}_feature_schema.json"),
+    }
+
+def load_validation_evidence(state_name: str, base_dir: str = None) -> Dict[str, Any]:
+    """
+    Loads persisted, reproducible validation evidence for a state, or returns an
+    explicit 'incomplete' result. This is the ONLY thing that may justify a
+    VALIDATED_PILOT claim. It NEVER fabricates metrics: the numbers can only come
+    from a real metrics.json written by an actual validation run.
+    """
+    import json
+    paths = _evidence_paths(state_name, base_dir)
+    missing = [
+        name for name, p in paths.items()
+        if not (os.path.exists(p) and os.path.getsize(p) > 0)
+    ]
+    if missing:
+        return {"complete": False, "missing": missing, "metrics": {},
+                "risk_result": None, "paths": paths}
+
+    try:
+        with open(paths["metrics"], "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except Exception as e:
+        return {"complete": False, "missing": ["metrics (unreadable)"],
+                "metrics": {}, "risk_result": None, "paths": paths, "error": str(e)}
+
+    metrics = doc.get("validation_metrics", doc) if isinstance(doc, dict) else None
+    if not isinstance(metrics, dict) or any(k not in metrics for k in REQUIRED_METRIC_KEYS):
+        # The metrics file exists but is not a structurally valid validation
+        # result. We refuse to treat it as evidence rather than inventing values.
+        return {"complete": False, "missing": ["metrics (invalid schema)"],
+                "metrics": {}, "risk_result": None, "paths": paths}
+
+    risk_result = doc.get("risk_result") if isinstance(doc, dict) else None
+    return {"complete": True, "missing": [], "metrics": metrics,
+            "risk_result": risk_result, "paths": paths}
+
 def determine_overall_status(
     state_name: str, 
     inventory: Dict[str, Any], 
     terrain: str, 
     rainfall: str, 
     exposure: str, 
-    is_pilot: bool
+    is_pilot: bool,
+    evidence_dir: str = None
 ) -> Dict[str, Any]:
     """
     Determines overall state validation status and lists blocking reasons.
@@ -280,23 +344,30 @@ def determine_overall_status(
         blockers.append(f"Insufficient usable landslide events ({inventory.get('usable_events', 0)} < 50)")
         
     if is_pilot:
-        overall_status = "VALIDATED_PILOT"
-        metrics = {
-            "PR-AUC": 0.7762,
-            "ROC-AUC": 0.9190,
-            "False Alarm Rate": 0.0317,
-            "Precision": 0.7778,
-            "Recall": 0.3684,
-            "F1": 0.5000,
-            "Spatial Coverage": "East Sikkim",
-            "Class Balance": "3:1 (Negative:Positive)"
-        }
-        model_status = "Trained & Validated"
-        risk_result = {
-            "susceptibility_score": 0.72,
-            "warning_level": "HIGH",
-            "coverage": "East Sikkim"
-        }
+        # A pilot may ONLY be reported as VALIDATED_PILOT when real, persisted,
+        # reproducible validation evidence exists on disk (a trained model
+        # artifact, a metrics.json written by an actual validation run, and a
+        # feature schema/provenance file). Being flagged is_pilot in config is
+        # NOT itself evidence of validation. When the evidence is absent we
+        # report an honest VALIDATION_REQUIRED state instead of fabricating a
+        # VALIDATED_PILOT claim or hardcoded metrics.
+        evidence = load_validation_evidence(state_name, base_dir=evidence_dir)
+        if evidence["complete"]:
+            overall_status = "VALIDATED_PILOT"
+            # Metrics come ONLY from the persisted validation artifact; they are
+            # never hardcoded here.
+            metrics = evidence["metrics"]
+            model_status = "Trained & Validated"
+            risk_result = evidence["risk_result"]
+        else:
+            overall_status = "VALIDATION_REQUIRED"
+            metrics = {}
+            model_status = "Validation Required (Persisted Model/Metrics Artifacts Absent)"
+            risk_result = None
+            blockers.append(
+                "Missing Persisted Validation Evidence ("
+                + ", ".join(evidence["missing"]) + ")"
+            )
     elif len(blockers) > 0:
         metrics = {}
         model_status = "Not Trained"
@@ -319,6 +390,56 @@ def determine_overall_status(
         "validation_metrics": metrics,
         "risk_result": risk_result
     }
+
+def reconcile_reported_status(record: Dict[str, Any], evidence_dir: str = None) -> Dict[str, Any]:
+    """
+    Reconciles a persisted state-validation record against the validation
+    evidence that is ACTUALLY present on disk right now. Earlier runs may have
+    written a VALIDATED_PILOT claim into state_validation.json; if the required
+    persisted evidence is no longer present (or never was), this returns a copy
+    whose reported status is downgraded to VALIDATION_REQUIRED so a runtime
+    reader cannot re-present an unbacked claim as current truth.
+
+    This NEVER rewrites the on-disk file -- historical evidence is preserved. It
+    only affects what the reader serves.
+    """
+    if not isinstance(record, dict):
+        return record
+    claims_validated = (
+        record.get("overall_status") == "VALIDATED_PILOT"
+        or record.get("validation_status") == "VALIDATED_PILOT"
+        or record.get("model_status") == "Trained & Validated"
+    )
+    if not claims_validated:
+        return record
+
+    state_name = record.get("state_name") or record.get("state") or ""
+    evidence = load_validation_evidence(state_name, base_dir=evidence_dir)
+    if evidence["complete"]:
+        return record
+
+    reconciled = dict(record)
+    reconciled["overall_status"] = "VALIDATION_REQUIRED"
+    reconciled["validation_status"] = "VALIDATION_REQUIRED"
+    reconciled["model_status"] = "Validation Required (Persisted Model/Metrics Artifacts Absent)"
+    reconciled["validation_metrics"] = {}
+    reconciled["risk_result"] = None
+    reconciled["reported_status_note"] = (
+        "Stored record claimed VALIDATED_PILOT, but required persisted validation "
+        "evidence (" + ", ".join(evidence["missing"]) + ") is absent at runtime; "
+        "reported status downgraded to VALIDATION_REQUIRED. The on-disk record was "
+        "left unchanged."
+    )
+    return reconciled
+
+def reconcile_validation_report(records: Any, evidence_dir: str = None) -> Any:
+    """
+    Applies reconcile_reported_status to every record in a loaded
+    state_validation report. Non-list payloads are returned unchanged.
+    """
+    if not isinstance(records, list):
+        return records
+    return [reconcile_reported_status(r, evidence_dir=evidence_dir) for r in records]
 
 def compute_inventory_diagnostics(state_name: str, config: Dict[str, Any], glc_df: pd.DataFrame) -> dict:
     raw_india = glc_df[glc_df['country_name'] == 'India']

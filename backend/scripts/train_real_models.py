@@ -26,16 +26,38 @@ def print_ram(stage):
     print(f"[{stage}] RAM Usage: {mem:.2f} MB")
     return mem
 
+class RainfallUnavailableError(RuntimeError):
+    """
+    Raised when real historical rainfall cannot be retrieved for a sample.
+
+    The training pipeline MUST treat this as a hard failure. It must never be
+    caught-and-ignored, and missing rainfall must never be substituted with
+    zero / mean / median / interpolated / synthetic / random values, because a
+    failed request must not become valid-looking training data.
+    """
+    pass
+
+
+# Number of antecedent days the model requires (strictly T-14 .. T-1 inclusive).
+ANTECEDENT_WINDOW_DAYS = 14
+
+
 def fetch_historical_rainfall_series(lat, lon, event_date_str):
     """
     Fetches real historical daily precipitation prior to event date T.
     Extracts 1d, 3d, 7d, 14d antecedent rainfall and 3d max intensity.
     Guarantees zero future rainfall leakage (uses T-14 to T-1 strictly).
+
+    On ANY failure to obtain a COMPLETE, real antecedent series -- HTTP error,
+    network/DNS/timeout error, malformed response, or fewer/at-null observations
+    than required -- this raises RainfallUnavailableError. It NEVER returns
+    zero-filled, padded, mean, interpolated, synthetic, or otherwise fabricated
+    rainfall: a failed request must never become valid-looking training data.
     """
     ed = pd.to_datetime(event_date_str)
-    start_date = (ed - pd.Timedelta(days=14)).strftime('%Y-%m-%d')
+    start_date = (ed - pd.Timedelta(days=ANTECEDENT_WINDOW_DAYS)).strftime('%Y-%m-%d')
     end_date = (ed - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-    
+
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
         "latitude": round(float(lat), 3),
@@ -45,29 +67,59 @@ def fetch_historical_rainfall_series(lat, lon, event_date_str):
         "daily": "precipitation_sum",
         "timezone": "UTC"
     }
+    context = f"(lat={params['latitude']}, lon={params['longitude']}, {start_date}..{end_date})"
+
+    # 1. Network / DNS / timeout errors are re-raised explicitly -- never
+    #    swallowed, never converted to zero rainfall.
     try:
         resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            precip = resp.json()["daily"]["precipitation_sum"]
-            arr = np.array(precip, dtype=np.float32)
-            # Ensure 14 days returned
-            if len(arr) < 14:
-                arr = np.pad(arr, (14 - len(arr), 0), mode='constant', constant_values=0.0)
-            return {
-                "rain_1d": float(arr[-1]),
-                "rain_3d": float(arr[-3:].sum()),
-                "rain_7d": float(arr[-7:].sum()),
-                "antecedent_rain_14d": float(arr.sum()),
-                "rain_intensity_max_3d": float(arr[-3:].max())
-            }
-    except Exception:
-        pass
+    except requests.RequestException as e:
+        raise RainfallUnavailableError(
+            f"Historical rainfall request failed {context}: {e!r}"
+        ) from e
+
+    # 2. Any non-200 response is an explicit failure, not zero rainfall.
+    if resp.status_code != 200:
+        raise RainfallUnavailableError(
+            f"Historical rainfall request returned HTTP {resp.status_code} {context}: "
+            f"{resp.text[:200]!r}"
+        )
+
+    # 3. Malformed JSON / missing keys are failures, not zeros.
+    try:
+        precip = resp.json()["daily"]["precipitation_sum"]
+    except (ValueError, KeyError, TypeError) as e:
+        raise RainfallUnavailableError(
+            f"Historical rainfall response could not be parsed {context}: {e!r}"
+        ) from e
+
+    # 4. Require a COMPLETE real series. Fewer observations than the required
+    #    antecedent window, or any missing (null) day, is treated as unavailable.
+    #    We do NOT pad or interpret missing days as 0 mm.
+    if precip is None or not isinstance(precip, (list, tuple)):
+        raise RainfallUnavailableError(
+            f"Historical rainfall response contained no daily series {context}."
+        )
+    if len(precip) < ANTECEDENT_WINDOW_DAYS:
+        raise RainfallUnavailableError(
+            f"Insufficient historical rainfall observations {context}: "
+            f"got {len(precip)}, need {ANTECEDENT_WINDOW_DAYS}."
+        )
+    if any(v is None for v in precip):
+        n_missing = sum(1 for v in precip if v is None)
+        raise RainfallUnavailableError(
+            f"Historical rainfall series has {n_missing} missing day(s) {context}; "
+            f"missing observations are NOT treated as zero rainfall."
+        )
+
+    # 5. Success: compute real antecedent features from the last N real days.
+    arr = np.array(precip, dtype=np.float32)[-ANTECEDENT_WINDOW_DAYS:]
     return {
-        "rain_1d": 0.0,
-        "rain_3d": 0.0,
-        "rain_7d": 0.0,
-        "antecedent_rain_14d": 0.0,
-        "rain_intensity_max_3d": 0.0
+        "rain_1d": float(arr[-1]),
+        "rain_3d": float(arr[-3:].sum()),
+        "rain_7d": float(arr[-7:].sum()),
+        "antecedent_rain_14d": float(arr.sum()),
+        "rain_intensity_max_3d": float(arr[-3:].max())
     }
 
 def sample_rasters_at_points(df, raster_paths):
@@ -222,11 +274,22 @@ def run_real_modeling_pipeline():
         return idx, rf
 
     rain_results = [None] * len(full_df)
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(fetch_row_rain, (idx, row)) for idx, row in full_df.iterrows()]
-        for future in as_completed(futures):
-            idx, rf = future.result()
-            rain_results[idx] = rf
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(fetch_row_rain, (idx, row)) for idx, row in full_df.iterrows()]
+            for future in as_completed(futures):
+                idx, rf = future.result()
+                rain_results[idx] = rf
+    except RainfallUnavailableError as e:
+        # Real rainfall is unavailable for at least one sample. Abort honestly:
+        # do NOT fabricate rainfall and do NOT persist a training matrix built on
+        # incomplete / zero-filled rainfall. No training_matrix artifact is written.
+        raise RainfallUnavailableError(
+            "ABORTING: real historical rainfall is unavailable for one or more "
+            "samples, so a scientifically valid training matrix cannot be built. "
+            "No zero/synthetic rainfall is substituted and no training_matrix "
+            f"artifact will be written. First failure: {e}"
+        ) from e
 
     rain_df = pd.DataFrame(rain_results)
     for col in rain_df.columns:

@@ -23,7 +23,11 @@ def analyze_exposure(hazard_grid: gpd.GeoDataFrame, osm_assets: gpd.GeoDataFrame
 
 def mock_get_osm_assets():
     """
-    Mock fetching OSM assets (highways, hospitals, schools) from Geofabrik/OSMnx.
+    TEST / DEMO FIXTURE ONLY -- returns two hardcoded points (a road and a
+    hospital). This is NOT real exposure data and MUST NOT be used to decide
+    production exposure availability. It is kept solely because existing tests
+    and the demo /exposure/alerts route depend on it; the real production path
+    is get_osm_assets(), which never fabricates assets.
     """
     return gpd.GeoDataFrame({
         "asset_name": ["NH-10", "STNM Hospital"],
@@ -131,21 +135,34 @@ def get_osm_assets(state_name: str, bbox: dict) -> gpd.GeoDataFrame:
                 })
                 
     if not features:
-        # Create a tiny dummy point around the center to keep it a valid geojson file and avoid crashing
-        dummy_geom = Point(lon_center, lat_center)
-        features.append({
-            "type": "Feature",
-            "properties": {"asset_name": f"State Center Point ({state_name})", "asset_type": "point", "osm_id": 0},
-            "geometry": dummy_geom
-        })
-        
+        # Overpass returned a VALID response but ZERO matching real assets for
+        # this bounding box. That is a legitimate "no exposure available"
+        # result -- it is NOT an error and NOT a licence to fabricate. We must
+        # not invent a state-centre point, dummy hospital, dummy road, zero-id
+        # asset, or any other synthetic feature. Return an explicitly EMPTY
+        # GeoDataFrame and DO NOT write a cache file, so that a downstream
+        # availability check (which treats any >100-byte cached GeoJSON as
+        # "Available") cannot be misled into reporting exposure that does not
+        # exist.
+        print(
+            f"[OSM] Overpass returned zero real assets for {state_name}; "
+            f"reporting EMPTY exposure (no synthetic asset created, no cache written)."
+        )
+        return gpd.GeoDataFrame(
+            columns=["asset_name", "asset_type", "osm_id", "geometry"],
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
     gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
-    
-    # Save cache as GeoJSON
+
+    # Persist cache as GeoJSON ONLY when we have REAL assets. An empty or
+    # synthetic result is never written to disk, precisely so that a stale or
+    # empty file cannot later be interpreted as "exposure Available".
     try:
         gdf.to_file(cache_path, driver="GeoJSON")
     except Exception as e:
         print(f"[OSM] Failed to write cache for {state_name}: {e}")
-        
+
     return gdf
 
