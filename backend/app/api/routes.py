@@ -73,9 +73,16 @@ def get_exposure_alerts():
 def get_validation_status():
     import json
     import os
+    from app.services.state_validation import reconcile_validation_report
     file_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "processed", "state_validation.json")
     if os.path.exists(file_path):
         with open(file_path, "r") as f:
-            return json.load(f)
+            records = json.load(f)
+        # Do not blindly trust stale validation claims persisted in the JSON: a
+        # record may say VALIDATED_PILOT even though the required persisted
+        # model/metrics evidence is absent. Reconcile against on-disk evidence so
+        # the API cannot present an unbacked claim as current truth. The file
+        # itself is left unchanged (historical evidence is preserved).
+        return reconcile_validation_report(records)
     else:
         return []
