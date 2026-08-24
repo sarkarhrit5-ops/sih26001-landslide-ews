@@ -1,7 +1,10 @@
 """
 RAIN-TRIGGER THRESHOLD MODULE
 
-Target Region: East Sikkim Pilot (27.0 N - 28.1 N, 88.0 E - 88.9 E)
+Target Region: the East Sikkim pilot AOI. The AOI is NOT restated here -- it is
+read from the single canonical definition in
+app.core.config_states.EAST_SIKKIM_PILOT_AOI, so this threshold can never claim a
+spatial extent different from the one the model was actually fitted on.
 
 Documentation & Metadata for Empirical Rainfall Threshold:
 ------------------------------------------------------------
@@ -29,6 +32,8 @@ Documentation & Metadata for Empirical Rainfall Threshold:
 
 import numpy as np
 
+from app.core.config_states import get_pilot_aoi_bounds
+
 THRESHOLD_METADATA = {
     "name": "East Sikkim pilot-derived empirical threshold",
     "formula": "I = 14.2 * D^(-0.62)",
@@ -39,7 +44,10 @@ THRESHOLD_METADATA = {
     },
     "derivation": "Log-log power-law lower-envelope quantile regression (5th percentile)",
     "events_count": 82,
-    "spatial_bounds": {"min_lat": 27.0, "max_lat": 28.1, "min_lon": 88.0, "max_lon": 88.9},
+    # Read from the canonical pilot AOI rather than restated, so the declared
+    # spatial validity of this threshold cannot drift away from the AOI the
+    # training/reproduction pipeline uses.
+    "spatial_bounds": get_pilot_aoi_bounds("Sikkim"),
     "confidence_level": "MEDIUM",
     "uncertainty_notes": "78.0% of catalog events have spatial location uncertainty >= 5 km.",
     "validation_method": "Temporal holdout split (2015-2017 test set)",

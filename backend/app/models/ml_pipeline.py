@@ -137,6 +137,26 @@ def compute_metrics(y_true, y_pred_proba, threshold=0.5):
         "False Alarm Rate": round(far, 4)
     }
 
+# The primary (headline) estimator for the East Sikkim pilot. Declared once here
+# so that the model persisted as validation evidence and the model whose metrics
+# are reported as the primary evaluation can never drift apart -- both go through
+# build_primary_model().
+PRIMARY_MODEL_NAME = "LightGBM"
+PRIMARY_MODEL_HYPERPARAMS = {
+    "n_estimators": 100,
+    "random_state": 42,
+    "n_jobs": 2,
+    "verbose": -1
+}
+
+def build_primary_model():
+    """
+    Constructs an UNFITTED primary estimator using the canonical hyperparameters.
+    Used both by train_and_evaluate_baselines (as its "LightGBM" baseline) and by
+    train_primary_model, so the two are guaranteed identical in configuration.
+    """
+    return lgb.LGBMClassifier(**PRIMARY_MODEL_HYPERPARAMS)
+
 def train_and_evaluate_baselines(X_train, X_test, y_train, y_test):
     """
     Trains Logistic Regression, Random Forest, and LightGBM baselines.
@@ -145,16 +165,36 @@ def train_and_evaluate_baselines(X_train, X_test, y_train, y_test):
     models = {
         "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
         "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=2),
-        "LightGBM": lgb.LGBMClassifier(n_estimators=100, random_state=42, n_jobs=2, verbose=-1)
+        "LightGBM": build_primary_model()
     }
-    
+
     results = {}
     for name, model in models.items():
         model.fit(X_train, y_train)
         preds_proba = model.predict_proba(X_test)[:, 1]
         results[name] = compute_metrics(y_test, preds_proba)
-        
+
     return results
+
+def train_primary_model(X_train, X_test, y_train, y_test):
+    """
+    Fits the primary estimator and returns BOTH the fitted model and its metrics.
+
+    train_and_evaluate_baselines() intentionally returns metrics only (its existing
+    contract is unchanged). This is the smallest additive mechanism that also hands
+    back the fitted estimator so it can be persisted as validation evidence.
+
+    Because it uses build_primary_model() and the same fixed random_state on the
+    same split, the returned metrics are the primary evaluation's metrics -- the
+    caller must not persist this model alongside metrics taken from a different
+    model or a different split.
+
+    Returns: (fitted_model, metrics_dict)
+    """
+    model = build_primary_model()
+    model.fit(X_train, y_train)
+    preds_proba = model.predict_proba(X_test)[:, 1]
+    return model, compute_metrics(y_test, preds_proba)
 
 def evaluate_model_decision(glc_quality_info: dict, baseline_results: dict):
     """

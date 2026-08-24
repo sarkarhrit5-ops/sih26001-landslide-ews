@@ -58,22 +58,23 @@ def check_label_quality(csv_path: str, bounds: dict, temporal_ml_min_events: int
 if __name__ == "__main__":
     import urllib.request
     import os
-    
+    import sys
+
+    # Allow this module to be run directly while still reading the AOI from the
+    # single canonical definition instead of restating the numbers here.
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+    from app.core.config_states import get_pilot_aoi_bounds
+
     url = "https://data.nasa.gov/docs/legacy/Global_Landslide_Catalog_Export/Global_Landslide_Catalog_Export_rows.csv"
     file_path = "data/raw/glc_legacy.csv"
-    
+
     if not os.path.exists(file_path):
         print("Downloading GLC dataset...")
         urllib.request.urlretrieve(url, file_path)
         print("Download complete.")
-        
-    bounds = {
-        "min_lat": 27.0,
-        "max_lat": 28.1,
-        "min_lon": 88.0,
-        "max_lon": 88.9
-    }
-    
+
+    bounds = get_pilot_aoi_bounds("Sikkim")
+
     results = check_label_quality(file_path, bounds)
     print("Label Gate Results:")
     for k, v in results.items():

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.services.weather_ingestion import fetch_imerg_precipitation
+from app.core.config_states import get_pilot_aoi_bounds
 
 def print_ram(stage):
     process = psutil.Process(os.getpid())
@@ -43,8 +44,8 @@ def run_smoke_test():
     peak_ram = []
     peak_ram.append(print_ram("Pre-fetch"))
     
-    # Target: East Sikkim Pilot
-    bounds = {"min_lat": 27.0, "max_lat": 28.1, "min_lon": 88.0, "max_lon": 88.9}
+    # Target: the canonical East Sikkim pilot AOI (not restated here)
+    bounds = get_pilot_aoi_bounds("Sikkim")
     # Pick a recent date
     test_date = datetime.now() - timedelta(days=7) 
     

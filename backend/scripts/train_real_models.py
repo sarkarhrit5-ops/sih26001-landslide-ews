@@ -17,8 +17,28 @@ from app.models.ml_pipeline import (
     run_spatial_holdout_validation,
     run_temporal_holdout_validation,
     train_and_evaluate_baselines,
-    evaluate_model_decision
+    train_primary_model,
+    evaluate_model_decision,
+    PRIMARY_MODEL_NAME,
+    PRIMARY_MODEL_HYPERPARAMS
 )
+from app.services import model_artifacts
+from app.core.config_states import (
+    get_pilot_aoi_bounds,
+    aoi_bounds_tuple,
+    bbox_contains,
+    check_pilot_aoi_consistency,
+    assert_pilot_aoi_consistency
+)
+from app.services.state_validation import get_dem_tiles_for_bbox
+
+# THE canonical AOI for this pipeline. This is not a local definition -- it is the
+# single canonical pilot AOI from app.core.config_states.EAST_SIKKIM_PILOT_AOI.
+# Every AOI-dependent step below (Copernicus tile selection, DEM mosaic crop, GLC
+# positive filter, buffered-negative sampling domain, reported coverage and
+# provenance) reads from this one object, so the AOI recorded in provenance is
+# provably the AOI used. Do NOT restate these numbers here or anywhere else.
+EAST_SIKKIM_AOI = get_pilot_aoi_bounds("Sikkim")
 
 def print_ram(stage):
     process = psutil.Process(os.getpid())
@@ -152,7 +172,20 @@ def run_real_modeling_pipeline():
     print("==========================================================")
     print("         REAL RAINFALL + REAL DEM + MODEL VALIDATION      ")
     print("==========================================================")
-    
+
+    print("\n--- 0. CANONICAL AOI ---")
+    # Fail fast if the canonical pilot AOI is not contained within Sikkim's
+    # administrative bounding box: that would mean the pilot is modelling terrain
+    # the state-level sweep does not even cover.
+    aoi_consistency = assert_pilot_aoi_consistency("Sikkim")
+    print(f"Canonical pilot AOI (app.core.config_states): {EAST_SIKKIM_AOI}")
+    print(f"Sikkim administrative bbox                 : {aoi_consistency['state_bbox']}")
+    print(f"Pilot AOI within administrative bbox       : {aoi_consistency['pilot_within_state']}")
+    if not aoi_consistency["boxes_identical"]:
+        print("Note: the administrative bbox is deliberately wider than the modelled "
+              f"pilot AOI (differs on: {', '.join(aoi_consistency['differing_keys'])}). "
+              "The pilot AOI is what this run trains, evaluates and reports on.")
+
     print("\n--- 1. EARTHDATA AUTHENTICATION CHECK ---")
     earthdata_status = "FAILED / UNCONFIGURED"
     earthdata_error = ""
@@ -176,34 +209,67 @@ def run_real_modeling_pipeline():
     
     dem_path = os.path.join(raw_dir, "east_sikkim_dem.tif")
     if not os.path.exists(dem_path):
-        print("Downloading real Copernicus 30m DEM for East Sikkim...")
-        tile1_url = 'https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N27_00_E088_00_DEM/Copernicus_DSM_COG_10_N27_00_E088_00_DEM.tif'
-        tile2_url = 'https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N28_00_E088_00_DEM/Copernicus_DSM_COG_10_N28_00_E088_00_DEM.tif'
-        f1 = os.path.join(raw_dir, "N27E088.tif")
-        f2 = os.path.join(raw_dir, "N28E088.tif")
-        if not os.path.exists(f1):
-            import urllib.request
-            urllib.request.urlretrieve(tile1_url, f1)
-        if not os.path.exists(f2):
-            import urllib.request
-            urllib.request.urlretrieve(tile2_url, f2)
+        print("Downloading real Copernicus 30m DEM for the canonical pilot AOI...")
+        import urllib.request
         from rasterio.merge import merge
-        src1 = rasterio.open(f1)
-        src2 = rasterio.open(f2)
-        mosaic, out_trans = merge([src1, src2], bounds=(88.0, 27.0, 88.9, 28.1))
-        out_meta = src1.meta.copy()
-        out_meta.update({
-            'driver': 'GTiff',
-            'height': mosaic.shape[1],
-            'width': mosaic.shape[2],
-            'transform': out_trans,
-            'crs': src1.crs,
-            'dtype': 'float32'
-        })
-        with rasterio.open(dem_path, 'w', **out_meta) as dst:
-            dst.write(mosaic[0].astype('float32'), 1)
-        src1.close()
-        src2.close()
+
+        # Tiles are DERIVED from the canonical AOI using the same helper the
+        # state-level sweep uses, instead of being hardcoded. The download and the
+        # mosaic crop therefore cannot cover an area different from the AOI this
+        # run filters events with and reports on.
+        required_tiles = get_dem_tiles_for_bbox(EAST_SIKKIM_AOI)
+        print(f"Copernicus tiles required by the canonical AOI: {required_tiles}")
+
+        tile_paths = []
+        for tile_lat, tile_lon in required_tiles:
+            tile_name = f"Copernicus_DSM_COG_10_N{tile_lat:02d}_00_E{tile_lon:03d}_00_DEM"
+            tile_url = f"https://copernicus-dem-30m.s3.amazonaws.com/{tile_name}/{tile_name}.tif"
+            tile_path = os.path.join(raw_dir, f"N{tile_lat:02d}E{tile_lon:03d}.tif")
+            if not os.path.exists(tile_path):
+                print(f"  fetching {os.path.basename(tile_path)}")
+                urllib.request.urlretrieve(tile_url, tile_path)
+            tile_paths.append(tile_path)
+
+        src_files = [rasterio.open(p) for p in tile_paths]
+        try:
+            mosaic, out_trans = merge(src_files, bounds=aoi_bounds_tuple(EAST_SIKKIM_AOI))
+            out_meta = src_files[0].meta.copy()
+            out_meta.update({
+                'driver': 'GTiff',
+                'height': mosaic.shape[1],
+                'width': mosaic.shape[2],
+                'transform': out_trans,
+                'crs': src_files[0].crs,
+                'dtype': 'float32'
+            })
+            with rasterio.open(dem_path, 'w', **out_meta) as dst:
+                dst.write(mosaic[0].astype('float32'), 1)
+        finally:
+            for src in src_files:
+                src.close()
+
+    # What the DEM on disk ACTUALLY covers, measured from the file itself rather
+    # than assumed, and compared against the canonical AOI. A tolerance of one
+    # pixel is allowed because the mosaic snaps to the source raster grid.
+    with rasterio.open(dem_path) as dem_src:
+        dem_grid_rows = int(dem_src.height)
+        dem_grid_cols = int(dem_src.width)
+        dem_pixel_deg = float(abs(dem_src.res[0]))
+        dem_actual_bounds = {
+            "min_lat": float(dem_src.bounds.bottom),
+            "max_lat": float(dem_src.bounds.top),
+            "min_lon": float(dem_src.bounds.left),
+            "max_lon": float(dem_src.bounds.right)
+        }
+    dem_covers_aoi = bbox_contains(dem_actual_bounds, EAST_SIKKIM_AOI, tol=dem_pixel_deg)
+    print(f"DEM grid measured on disk: {dem_grid_rows} x {dem_grid_cols} cells "
+          f"@ {dem_pixel_deg:.9f} deg/px")
+    print(f"DEM bounds measured on disk: {dem_actual_bounds}")
+    print(f"DEM fully covers canonical AOI: {dem_covers_aoi}")
+    if not dem_covers_aoi:
+        print("WARNING: the DEM on disk does NOT fully cover the canonical pilot AOI. "
+              "Terrain features for samples outside DEM coverage will be nodata. This "
+              "is recorded in provenance and must not be reported as full-AOI coverage.")
 
     terrain_paths = process_dem_in_chunks(dem_path, proc_dir, chunk_size=512)
     dem_verif = verify_dem_terrain_features(dem_path, terrain_paths)
@@ -219,10 +285,11 @@ def run_real_modeling_pipeline():
         download_and_prepare_glc("https://data.nasa.gov/docs/legacy/Global_Landslide_Catalog_Export/Global_Landslide_Catalog_Export_rows.csv", glc_path)
 
     raw_glc_df = pd.read_csv(glc_path)
-    # Filter East Sikkim AOI: lat 27.0-28.1, lon 88.0-88.9
+    # Filter to the canonical pilot AOI (numbers deliberately not restated here --
+    # see EAST_SIKKIM_AOI / app.core.config_states.EAST_SIKKIM_PILOT_AOI).
     aoi_mask = (
-        (raw_glc_df["latitude"] >= 27.0) & (raw_glc_df["latitude"] <= 28.1) &
-        (raw_glc_df["longitude"] >= 88.0) & (raw_glc_df["longitude"] <= 88.9)
+        (raw_glc_df["latitude"] >= EAST_SIKKIM_AOI["min_lat"]) & (raw_glc_df["latitude"] <= EAST_SIKKIM_AOI["max_lat"]) &
+        (raw_glc_df["longitude"] >= EAST_SIKKIM_AOI["min_lon"]) & (raw_glc_df["longitude"] <= EAST_SIKKIM_AOI["max_lon"])
     )
     pos_df = raw_glc_df[aoi_mask].copy()
     pos_df["event_date"] = pd.to_datetime(pos_df["event_date"], errors="coerce")
@@ -255,7 +322,9 @@ def run_real_modeling_pipeline():
     pos_df = assign_land_cover_proxy(pos_df)
 
     # Generate spatially buffered negative control samples
-    dem_bounds = {"min_lat": 27.0, "max_lat": 28.1, "min_lon": 88.0, "max_lon": 88.9}
+    # Buffered negatives are drawn from exactly the canonical AOI rectangle, i.e.
+    # the same extent the positives were filtered to and the DEM was cropped to.
+    dem_bounds = dict(EAST_SIKKIM_AOI)
     neg_df = generate_spatial_negative_samples(pos_df, dem_bounds, count_ratio=3, buffer_deg=0.05)
     neg_df = sample_rasters_at_points(neg_df, raster_map)
     neg_df = assign_land_cover_proxy(neg_df)
@@ -367,6 +436,166 @@ def run_real_modeling_pipeline():
     for reason in decision["justification_reasons"]:
         print(f"  - {reason}")
 
+    print("\n--- 7. PERSISTING VALIDATION EVIDENCE ARTIFACTS ---")
+    # This section is reached ONLY when everything above succeeded: the real DEM
+    # was processed, real GLC labels were filtered, real antecedent rainfall was
+    # retrieved for every sample (any failure raises RainfallUnavailableError far
+    # above this point), the training matrix was written, and all four holdout
+    # evaluations completed. If any of that fails, execution never gets here and
+    # NO artifact is written -- the validation gate keeps reporting
+    # VALIDATION_REQUIRED, which is the honest outcome.
+    artifact_paths = None
+    try:
+        # Fit the primary estimator (temporal holdout + static+rainfall features).
+        # Same class, same hyperparameters, same seed, same split as the LightGBM
+        # entry in tm_dy_res, so the persisted model IS the model whose metrics we
+        # report as the primary evaluation.
+        primary_model, primary_metrics = train_primary_model(
+            X_train_tm_dy, X_test_tm_dy, y_train_tm, y_test_tm
+        )
+
+        reported_metrics = tm_dy_res.get(PRIMARY_MODEL_NAME, {})
+        if primary_metrics != reported_metrics:
+            # Refuse to publish a model whose metrics do not reproduce the reported
+            # primary evaluation, rather than silently pairing a model with numbers
+            # that came from a different fit.
+            raise model_artifacts.ArtifactValidationError(
+                "Primary model metrics did not reproduce the reported primary "
+                f"evaluation. Refitted={primary_metrics} vs reported={reported_metrics}. "
+                "No artifact written."
+            )
+
+        metrics_doc = model_artifacts.build_metrics_document(
+            validation_metrics=primary_metrics,
+            primary_model_name=PRIMARY_MODEL_NAME,
+            primary_evaluation="temporal_holdout / static_plus_rainfall",
+            feature_set="static_plus_rainfall",
+            model_comparison={
+                "spatial_holdout": {
+                    "static_only": sp_st_res,
+                    "static_plus_rainfall": sp_dy_res
+                },
+                "temporal_holdout": {
+                    "static_only": tm_st_res,
+                    "static_plus_rainfall": tm_dy_res
+                }
+            },
+            holdout_details={
+                "spatial_holdout": "Latitude median split (train <= median, test > median)",
+                "temporal_holdout": "Event year split (train <= 2014, test >= 2015)",
+                "decision_threshold": 0.5
+            },
+            sample_counts={
+                "total_samples": int(len(full_df)),
+                "positive_samples": int(dedup_count),
+                "negative_samples": int(len(neg_df)),
+                "primary_train_samples": int(len(X_train_tm_dy)),
+                "primary_test_samples": int(len(X_test_tm_dy)),
+                "primary_train_positives": int(y_train_tm.sum()),
+                "primary_test_positives": int(y_test_tm.sum())
+            },
+            decision=decision,
+            dataset_provenance_reference=parquet_path
+        )
+
+        feature_schema_doc = model_artifacts.build_feature_schema_document(
+            # Captured from the list actually passed to the fitted model, not a
+            # hardcoded copy: X_train_tm_dy was built from dynamic_features.
+            feature_names=list(X_train_tm_dy.columns),
+            dtypes={k: str(v) for k, v in X_train_tm_dy.dtypes.astype(str).to_dict().items()},
+            feature_set_name="static_plus_rainfall",
+            target_column="target"
+        )
+
+        provenance_doc = model_artifacts.build_provenance_document(
+            aoi=dict(EAST_SIKKIM_AOI),
+            model_type=f"{PRIMARY_MODEL_NAME} (lightgbm.LGBMClassifier)",
+            model_hyperparameters=dict(PRIMARY_MODEL_HYPERPARAMS),
+            feature_list=list(X_train_tm_dy.columns),
+            random_seed=42,
+            glc_source="NASA Global Landslide Catalog Export (glc_legacy.csv), AOI-filtered",
+            glc_event_count=int(dedup_count),
+            sample_counts={
+                "raw_catalog_events_in_aoi": int(raw_pos_count),
+                "deduplicated_positive_events": int(dedup_count),
+                "negative_samples": int(len(neg_df)),
+                "total_samples": int(len(full_df)),
+                "independent_event_dates": int(glc_info["independent_events"]),
+                "pct_events_spatial_uncertainty_ge_5km": round(float(pct_low_accuracy), 1)
+            },
+            rainfall_source=(
+                "Open-Meteo ERA5 archive API (daily precipitation_sum), antecedent "
+                "window strictly T-14..T-1; no zero-fill or synthetic substitution"
+            ),
+            dem_source="Copernicus GLO-30 DEM (30 m), tiles N27E088 + N28E088, merged and clipped to AOI",
+            terrain_derivative_method=(
+                "app.services.terrain_processing.process_dem_in_chunks "
+                "(slope, aspect, roughness, tpi; chunked at 512 px)"
+            ),
+            exposure_source="NOT USED as a model feature in this run (OSM exposure is not part of the training features)",
+            spatial_split="Latitude median split (South vs North East Sikkim)",
+            temporal_split="Event year split (train <= 2014, test >= 2015)",
+            negative_sampling="Spatially buffered random points, >= 0.05 deg (~5 km) from any positive, 3:1 ratio, seed 42",
+            leakage_controls=leakage_checks,
+            dataset_artifact=parquet_path,
+            input_status={
+                "dem_copernicus_glo30": "REAL",
+                "terrain_derivatives": "REAL",
+                "landslide_inventory_glc": "REAL",
+                "antecedent_rainfall_open_meteo_era5": "REAL",
+                "land_cover_class": "DERIVED_PROXY",
+                "imerg_satellite_rainfall": "NOT_USED",
+                "osm_exposure": "NOT_USED"
+            },
+            extra={
+                "earthdata_auth_status": earthdata_status,
+                "earthdata_note": (
+                    "IMERG was NOT used to build any training feature. Antecedent "
+                    "rainfall features come from the Open-Meteo ERA5 archive."
+                ),
+                "dem_verification": {k: str(v) for k, v in dem_verif.items()},
+                "aoi_source": (
+                    "app.core.config_states.EAST_SIKKIM_PILOT_AOI -- the single "
+                    "canonical pilot AOI. This run restates no AOI numbers of its "
+                    "own: Copernicus tile selection, DEM mosaic crop, GLC positive "
+                    "filter and negative sampling domain all read from it."
+                ),
+                "aoi_vs_state_bbox": aoi_consistency,
+                "aoi_vs_state_bbox_note": (
+                    "The Sikkim administrative bbox in app.core.config_states is "
+                    "deliberately wider than the modelled pilot AOI and is used only "
+                    "for the 8-state sweep (inventory counts, exposure query window, "
+                    "rainfall subsetting). The pilot AOI recorded above is the extent "
+                    "this model was actually trained and evaluated on."
+                ),
+                "dem_measured_coverage": {
+                    "rows": dem_grid_rows,
+                    "cols": dem_grid_cols,
+                    "pixel_size_deg": dem_pixel_deg,
+                    "bounds_measured_from_file": dem_actual_bounds,
+                    "fully_covers_canonical_aoi": dem_covers_aoi
+                }
+            }
+        )
+
+        artifact_paths = model_artifacts.save_model_evidence(
+            model=primary_model,
+            metrics_doc=metrics_doc,
+            schema_doc=feature_schema_doc,
+            provenance_doc=provenance_doc,
+            state_name="Sikkim"
+        )
+        print("Persisted validation evidence artifacts:")
+        for kind in ("model", "metrics", "schema", "provenance"):
+            print(f"  {kind:11s}: {artifact_paths[kind]}")
+        print("These artifacts now satisfy the persisted-evidence gate in "
+              "app.services.state_validation.load_validation_evidence().")
+    except model_artifacts.ArtifactPersistenceError as e:
+        # Explicitly do NOT write a partial or misleading artifact set.
+        print("ARTIFACT PERSISTENCE REFUSED (no artifact written):")
+        print(f"  {e}")
+        print("Validation status remains VALIDATION_REQUIRED, which is the honest outcome.")
+
     total_runtime = time.time() - start_time
     max_ram = max(peak_ram)
 
@@ -374,13 +603,16 @@ def run_real_modeling_pipeline():
     print("                  FINAL METRICS REPORT                    ")
     print("==========================================================")
     print(f"Real Datasets Used      : Copernicus 30m DEM (GLO-30), NASA GLC Export (GLC Legacy), Open-Meteo ERA5 Historical Rainfall")
-    print(f"DEM Coverage            : East Sikkim Pilot AOI (27.0 N to 28.1 N, 88.0 E to 88.9 E, 3960 x 3240 cells @ 30m)")
+    print(f"Canonical AOI           : {EAST_SIKKIM_AOI} (app.core.config_states.EAST_SIKKIM_PILOT_AOI)")
+    print(f"DEM Coverage            : {dem_grid_rows} x {dem_grid_cols} cells @ {dem_pixel_deg:.9f} deg/px, "
+          f"bounds measured from file {dem_actual_bounds}, fully covers canonical AOI: {dem_covers_aoi}")
     print(f"Rainfall Coverage       : Historical daily series (14d antecedent) for all positive & negative event dates")
     print(f"Feature Count           : 11 (6 Static: elevation, slope, aspect, roughness, tpi, land_cover + 5 Rainfall: 1d, 3d, 7d, 14d_antecedent, max_3d_intensity)")
-    print(f"Training Sample Count   : {len(full_df)} (82 Real Positives + 246 Buffered Negatives)")
+    print(f"Training Sample Count   : {len(full_df)} ({dedup_count} real positives from the canonical AOI + {len(neg_df)} buffered negatives)")
     print(f"Validation Strategy     : Spatial Holdout (Latitude median split) & Temporal Holdout (2007-2014 Train vs 2015-2017 Test)")
     print(f"8 GB RAM Constraint Met : YES (Peak RAM: {max_ram:.2f} MB)")
     print(f"Pipeline Total Runtime  : {total_runtime:.2f} seconds")
+    print(f"Persisted Artifacts     : {'WRITTEN to backend/data/models/' if artifact_paths else 'NOT WRITTEN (see section 7)'}")
     print("Remaining Blockers      : NASA Earthdata authentication credentials required for live IMERG satellite stream.")
     print("==========================================================")
 
