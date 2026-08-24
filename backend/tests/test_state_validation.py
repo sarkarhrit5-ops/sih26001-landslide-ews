@@ -13,6 +13,7 @@ from app.services.state_validation import (
     load_validation_evidence,
     reconcile_validation_report,
 )
+import app.services.state_validation as sv
 
 # ---------------------------------------------------------------------------
 # Test fixtures / helpers
@@ -213,3 +214,113 @@ def test_determine_overall_status_in_progress():
     status = determine_overall_status("Assam", inventory, "Available", "Authenticated", "Available", False)
     assert status["overall_status"] == "VALIDATION IN PROGRESS"
     assert len(status["blocking_reasons"]) == 0
+
+# ---------------------------------------------------------------------------
+# Phase 2F: reader gate rejects structurally-present but degenerate metrics
+# ---------------------------------------------------------------------------
+# The three keys can all be present yet carry null / non-numeric / non-finite
+# values (a partially-written, hand-edited or otherwise corrupt metrics.json).
+# Accepting that would report VALIDATED_PILOT off a meaningless number, so the
+# reader gate now refuses such values -- mirroring the writer gate.
+
+def test_pilot_with_null_metric_value_is_not_validated(tmp_path):
+    _write_evidence(tmp_path, "sikkim", metrics={"PR-AUC": None, "ROC-AUC": 0.6})
+    status = determine_overall_status(
+        "Sikkim", {"usable_events": 100}, "Available", "Authenticated", "Available", True,
+        evidence_dir=str(tmp_path)
+    )
+    assert status["overall_status"] == "VALIDATION_REQUIRED"
+    assert status["validation_metrics"] == {}
+
+def test_load_validation_evidence_rejects_non_numeric_metric(tmp_path):
+    _write_evidence(tmp_path, "sikkim", metrics={"PR-AUC": "n/a", "ROC-AUC": 0.6})
+    ev = load_validation_evidence("Sikkim", base_dir=str(tmp_path))
+    assert ev["complete"] is False
+    assert ev["metrics"] == {}
+    assert any(("non-numeric" in m or "non-finite" in m) for m in ev["missing"])
+
+def test_load_validation_evidence_rejects_nonfinite_metric(tmp_path):
+    # json writes NaN as the literal `NaN`, which json.load reads back as float
+    # nan; a non-finite metric is not real evidence.
+    _write_evidence(tmp_path, "sikkim", metrics={"PR-AUC": float("nan"), "ROC-AUC": 0.6})
+    ev = load_validation_evidence("Sikkim", base_dir=str(tmp_path))
+    assert ev["complete"] is False
+
+def test_load_validation_evidence_rejects_bool_metric(tmp_path):
+    # bool is a subclass of int; True must NOT masquerade as a numeric metric.
+    _write_evidence(tmp_path, "sikkim", metrics={"PR-AUC": True, "ROC-AUC": 0.6})
+    ev = load_validation_evidence("Sikkim", base_dir=str(tmp_path))
+    assert ev["complete"] is False
+
+def test_load_validation_evidence_still_accepts_real_floats(tmp_path):
+    # Regression guard: legitimate float metrics remain acceptable and flow verbatim.
+    metrics = {"PR-AUC": 0.0, "ROC-AUC": 0.6}  # 0.0 is a real, finite value
+    _write_evidence(tmp_path, "sikkim", metrics=metrics)
+    ev = load_validation_evidence("Sikkim", base_dir=str(tmp_path))
+    assert ev["complete"] is True
+    assert ev["metrics"] == metrics
+
+# ---------------------------------------------------------------------------
+# Phase 2F: the live "Unavailable (...)" rainfall vocabulary is recognised
+# ---------------------------------------------------------------------------
+
+def test_unavailable_rainfall_string_flags_the_earthdata_blocker():
+    # evaluate_state_rainfall now emits "Unavailable (NASA Earthdata ...)" instead
+    # of the old "Unauthenticated"/"Missing ..." tokens. A non-pilot state whose
+    # satellite IMERG is genuinely unavailable must still surface the blocker.
+    status = determine_overall_status(
+        "Assam", {"usable_events": 100}, "Available",
+        "Unavailable (NASA Earthdata authentication failed)", "Available", False
+    )
+    assert "Missing Earthdata Credentials for IMERG" in status["blocking_reasons"]
+    assert status["overall_status"] == "DATA UNAVAILABLE"
+
+def test_authenticated_rainfall_string_does_not_flag_the_blocker():
+    status = determine_overall_status(
+        "Assam", {"usable_events": 100}, "Available",
+        "Authenticated (Satellite IMERG)", "Available", False
+    )
+    assert "Missing Earthdata Credentials for IMERG" not in status["blocking_reasons"]
+    assert status["overall_status"] == "VALIDATION IN PROGRESS"
+
+# ---------------------------------------------------------------------------
+# Phase 2F: an UNAVAILABLE satellite-IMERG state must not be labeled a fallback
+# ---------------------------------------------------------------------------
+# evaluate_state_rainfall has NO synthetic/fallback rainfall path: when Earthdata
+# auth fails it reports the data UNAVAILABLE. The is_fallback flag -- and the
+# "Fallback: ..." line process_state prints from it -- must therefore be False in
+# BOTH branches; reporting True implied a working substitute that does not exist.
+
+def _swap_earthdata(session_value, raises):
+    """Rebind state_validation.get_earthdata_session; return the original."""
+    original = sv.get_earthdata_session
+    if raises:
+        def _sess():
+            raise PermissionError("BLOCKER: Missing NASA Earthdata credentials")
+    else:
+        def _sess():
+            return session_value
+    sv.get_earthdata_session = _sess
+    return original
+
+def test_state_rainfall_unavailable_is_not_labeled_fallback():
+    original = _swap_earthdata(None, raises=True)
+    try:
+        info = sv.evaluate_state_rainfall("Assam", NER_STATES_CONFIG["Assam"])
+    finally:
+        sv.get_earthdata_session = original
+    assert info["imerg_available"] is False
+    assert info["is_fallback"] is False          # nothing is substituted -> not a fallback
+    assert info["unavailable_reason"]            # the real reason is carried
+    assert "no synthetic substitute" in info["source"]
+    assert info["status"].startswith("Unavailable")
+
+def test_state_rainfall_available_is_not_fallback():
+    original = _swap_earthdata(object(), raises=False)
+    try:
+        info = sv.evaluate_state_rainfall("Sikkim", NER_STATES_CONFIG["Sikkim"])
+    finally:
+        sv.get_earthdata_session = original
+    assert info["imerg_available"] is True
+    assert info["is_fallback"] is False
+    assert info["unavailable_reason"] is None

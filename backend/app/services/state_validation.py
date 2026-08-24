@@ -1,4 +1,5 @@
 import os
+import math
 import pandas as pd
 from typing import Dict, Any
 from app.core.config_states import NER_STATES_CONFIG
@@ -228,7 +229,7 @@ def evaluate_state_rainfall(state_name: str, state_config: Dict[str, Any]) -> Di
         return {
             "source": "UNAVAILABLE (NASA IMERG not authenticated; no synthetic substitute)",
             "status": "Unavailable (NASA Earthdata authentication failed)",
-            "is_fallback": True,
+            "is_fallback": False,
             "imerg_available": False,
             "unavailable_reason": reason
         }
@@ -292,6 +293,25 @@ def evaluate_exposure_data(state_name: str, state_config: Dict[str, Any]) -> str
 # metrics.json -- they are never hardcoded.
 REQUIRED_METRIC_KEYS = ("PR-AUC", "ROC-AUC")
 
+
+def _is_finite_metric(value) -> bool:
+    """
+    True only for a real, finite numeric metric value. Rejects bools, None,
+    strings and NaN/inf so that a metrics.json which is structurally present but
+    degenerate (e.g. {"PR-AUC": null, "ROC-AUC": "n/a"}) cannot be accepted as
+    validation evidence. Mirrors model_artifacts._is_real_number without importing
+    the scientific stack.
+    """
+    if isinstance(value, bool) or value is None:
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def _evidence_paths(state_name: str, base_dir: str = None) -> Dict[str, str]:
     clean_state_name = state_name.lower().replace(' ', '_')
     if base_dir is None:
@@ -334,6 +354,15 @@ def load_validation_evidence(state_name: str, base_dir: str = None) -> Dict[str,
         # result. We refuse to treat it as evidence rather than inventing values.
         return {"complete": False, "missing": ["metrics (invalid schema)"],
                 "metrics": {}, "risk_result": None, "paths": paths}
+    if not all(_is_finite_metric(metrics[k]) for k in REQUIRED_METRIC_KEYS):
+        # The required keys are present but at least one value is null, non-numeric
+        # or non-finite. Accepting that would surface a degenerate or tampered
+        # metrics file as a real VALIDATED_PILOT result, so we refuse it here just
+        # as the writer gate (model_artifacts._is_real_number) refuses to persist
+        # such values.
+        return {"complete": False,
+                "missing": ["metrics (non-numeric or non-finite values)"],
+                "metrics": {}, "risk_result": None, "paths": paths}
 
     risk_result = doc.get("risk_result") if isinstance(doc, dict) else None
     return {"complete": True, "missing": [], "metrics": metrics,
@@ -357,7 +386,18 @@ def determine_overall_status(
         blockers.append("Missing DEM Data")
     if exposure != "Available" and not is_pilot:
         blockers.append("Missing OSM Exposure Data")
-    if (rainfall == "Unauthenticated" or "Missing Earthdata" in rainfall or rainfall.startswith("Missing")) and not is_pilot:
+    # Recognise the live "Unavailable (...)" rainfall vocabulary emitted by
+    # evaluate_rainfall_status / evaluate_state_rainfall, not only the older
+    # "Unauthenticated" / "Missing ..." tokens. Without this, a non-pilot state
+    # whose satellite IMERG is genuinely unavailable would silently omit the
+    # rainfall blocker from its reasons list.
+    rainfall_unavailable = (
+        rainfall == "Unauthenticated"
+        or rainfall.startswith("Missing")
+        or rainfall.startswith("Unavailable")
+        or "Missing Earthdata" in rainfall
+    )
+    if rainfall_unavailable and not is_pilot:
         blockers.append("Missing Earthdata Credentials for IMERG")
     if inventory.get("usable_events", 0) < 50 and not is_pilot:
         blockers.append(f"Insufficient usable landslide events ({inventory.get('usable_events', 0)} < 50)")
