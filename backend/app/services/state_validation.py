@@ -521,7 +521,13 @@ def compute_inventory_diagnostics(state_name: str, config: Dict[str, Any], glc_d
     elif state_name == "Meghalaya":
         state_names.extend(["Meghālaya", "meghalaya"])
         
-    admin_mask = glc_df['admin_division_name'].astype(str).apply(
+    # admin_division_name is NaN for catalog rows with no admin label. Under
+    # pandas 3.x, Series.astype(str) preserves missing values as NA rather than
+    # coercing them to the literal "nan" string (the pre-3.x behavior), so a raw
+    # NaN would reach the lambda as a missing scalar and raise AttributeError on
+    # x.lower(). fillna('') makes this NaN-safe across pandas versions; an empty
+    # admin string matches no state name, identical to the prior "nan"-string result.
+    admin_mask = glc_df['admin_division_name'].fillna('').astype(str).apply(
         lambda x: any(name.lower() in x.lower() for name in state_names)
     )
     admin_df = glc_df[admin_mask & (glc_df['country_name'] == 'India')]

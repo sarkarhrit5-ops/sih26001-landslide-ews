@@ -1,0 +1,105 @@
+{
+  "provenance_schema_version": "1.0.0",
+  "state": "Sikkim",
+  "pilot_area": "East Sikkim",
+  "aoi": {
+    "min_lat": 27.0,
+    "max_lat": 28.1,
+    "min_lon": 88.0,
+    "max_lon": 88.9
+  },
+  "glc_source": "NASA Global Landslide Catalog Export (glc_legacy.csv), AOI-filtered",
+  "glc_event_count": 82,
+  "sample_counts": {
+    "raw_catalog_events_in_aoi": 82,
+    "deduplicated_positive_events": 82,
+    "negative_samples": 246,
+    "total_samples": 328,
+    "independent_event_dates": 72,
+    "pct_events_spatial_uncertainty_ge_5km": 78.0
+  },
+  "rainfall_source": "Open-Meteo ERA5 archive API (daily precipitation_sum), antecedent window strictly T-14..T-1; no zero-fill or synthetic substitution",
+  "dem_source": "Copernicus GLO-30 DEM (30 m), tiles N27E088 + N28E088, merged and clipped to AOI",
+  "terrain_derivative_method": "app.services.terrain_processing.process_dem_in_chunks (slope, aspect, roughness, tpi; chunked at 512 px)",
+  "exposure_source": "NOT USED as a model feature in this run",
+  "model_type": "LightGBM (lightgbm.LGBMClassifier)",
+  "model_hyperparameters": {
+    "n_estimators": 100,
+    "random_state": 42,
+    "n_jobs": 2,
+    "verbose": -1
+  },
+  "model_serialization": "joblib",
+  "feature_list": [
+    "elevation",
+    "slope",
+    "aspect",
+    "roughness",
+    "tpi",
+    "land_cover_class",
+    "rain_1d",
+    "rain_3d",
+    "rain_7d",
+    "antecedent_rain_14d",
+    "rain_intensity_max_3d"
+  ],
+  "spatial_split": "Latitude median split (South vs North East Sikkim)",
+  "temporal_split": "Event year split (train <= 2014, test >= 2015)",
+  "negative_sampling": "Spatially buffered random points, >= 0.05 deg (~5 km) from any positive, 3:1 ratio, seed 42",
+  "leakage_controls": {
+    "spatial_leakage": "MITIGATED: buffered negative sampling (>= 0.05 deg) + latitude-median spatial holdout.",
+    "temporal_leakage": "MITIGATED: strict temporal holdout (train <= 2014 vs test >= 2015).",
+    "future_rainfall_leakage": "MITIGATED: antecedent rainfall strictly from T-14..T-1.",
+    "duplicate_overlapping_events": "MITIGATED: 0 duplicate (lat,lon,event_date) positives (raw=82, dedup=82)."
+  },
+  "random_seed": 42,
+  "dataset_artifact": "D:\\landslide\\sih26001-landslide-ews\\backend\\data\\processed\\training_matrix.parquet",
+  "code_version": "ba4c274c9f60030c6f7199ccb4087be70641f76d",
+  "software_versions": {
+    "python": "3.14.2",
+    "numpy": "2.5.2",
+    "pandas": "3.0.5",
+    "sklearn": "1.9.0",
+    "lightgbm": "4.7.0",
+    "joblib": "1.5.3",
+    "rasterio": "1.5.1",
+    "pyarrow": "25.0.1",
+    "requests": "2.34.2"
+  },
+  "input_status": {
+    "dem_copernicus_glo30": "REAL",
+    "terrain_derivatives": "REAL",
+    "landslide_inventory_glc": "REAL",
+    "antecedent_rainfall_open_meteo_era5": "REAL",
+    "land_cover_class": "DERIVED_PROXY",
+    "imerg_satellite_rainfall": "NOT_USED",
+    "osm_exposure": "NOT_USED"
+  },
+  "generation_timestamp": "2026-08-24T10:30:10Z",
+  "additional_context": {
+    "phase": "3G",
+    "matrix_sha256": "0c378329d1559c8ae10b3604974b85eb140940a9416540536759cbc1888ec4b9",
+    "run_mode": "persist",
+    "csv_crosscheck": {
+      "performed": true,
+      "raw_pos_count": 82,
+      "dedup_count": 82,
+      "pct_low_accuracy": 78.0488,
+      "independent_events": 72,
+      "agrees_with_parquet": true
+    },
+    "dem_measured_coverage": {
+      "rows": 3960,
+      "cols": 3240,
+      "pixel_size_deg": 0.0002777777777777778,
+      "bounds_measured_from_file": {
+        "min_lat": 27.0,
+        "max_lat": 28.1,
+        "min_lon": 88.0,
+        "max_lon": 88.9
+      }
+    },
+    "aoi_source": "app.core.config_states.EAST_SIKKIM_PILOT_AOI -- the single canonical pilot AOI used for tile selection, DEM crop, GLC filter and negative sampling.",
+    "note": "Trained from the Phase-3F-audited training_matrix.parquet (SHA pinned above); DEM/terrain/rainfall stages were executed and verified in Phases 3C-3F."
+  }
+}

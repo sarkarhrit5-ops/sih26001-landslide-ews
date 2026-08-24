@@ -1,0 +1,152 @@
+{
+  "metrics_schema_version": "1.0.0",
+  "state": "Sikkim",
+  "pilot_area": "East Sikkim",
+  "validation_metrics": {
+    "PR-AUC": 0.6926,
+    "ROC-AUC": 0.8914,
+    "Precision": 0.6923,
+    "Recall": 0.4737,
+    "F1": 0.5625,
+    "False Alarm Rate": 0.0635
+  },
+  "metrics_source": "computed_from_validation_run",
+  "status": "REAL/COMPUTED",
+  "primary_model": "LightGBM",
+  "primary_evaluation": "temporal_holdout / static_plus_rainfall",
+  "feature_set": "static_plus_rainfall",
+  "holdout_details": {
+    "spatial_holdout": "Latitude median split (train <= median, test > median)",
+    "temporal_holdout": "Event year split (train <= 2014, test >= 2015)",
+    "decision_threshold": 0.5
+  },
+  "sample_counts": {
+    "total_samples": 328,
+    "positive_samples": 82,
+    "negative_samples": 246,
+    "primary_train_samples": 246,
+    "primary_test_samples": 82,
+    "primary_train_positives": 63,
+    "primary_test_positives": 19
+  },
+  "model_comparison": {
+    "spatial_holdout": {
+      "static_only": {
+        "Logistic Regression": {
+          "PR-AUC": 0.6842,
+          "ROC-AUC": 0.9033,
+          "Precision": 1.0,
+          "Recall": 0.2857,
+          "F1": 0.4444,
+          "False Alarm Rate": 0.0
+        },
+        "Random Forest": {
+          "PR-AUC": 0.1333,
+          "ROC-AUC": 0.6436,
+          "Precision": 0.04,
+          "Recall": 0.0714,
+          "F1": 0.0513,
+          "False Alarm Rate": 0.16
+        },
+        "LightGBM": {
+          "PR-AUC": 0.2178,
+          "ROC-AUC": 0.6443,
+          "Precision": 0.1481,
+          "Recall": 0.2857,
+          "F1": 0.1951,
+          "False Alarm Rate": 0.1533
+        }
+      },
+      "static_plus_rainfall": {
+        "Logistic Regression": {
+          "PR-AUC": 0.6129,
+          "ROC-AUC": 0.881,
+          "Precision": 1.0,
+          "Recall": 0.2857,
+          "F1": 0.4444,
+          "False Alarm Rate": 0.0
+        },
+        "Random Forest": {
+          "PR-AUC": 0.2663,
+          "ROC-AUC": 0.7033,
+          "Precision": 0.2857,
+          "Recall": 0.2857,
+          "F1": 0.2857,
+          "False Alarm Rate": 0.0667
+        },
+        "LightGBM": {
+          "PR-AUC": 0.2953,
+          "ROC-AUC": 0.6433,
+          "Precision": 0.2857,
+          "Recall": 0.1429,
+          "F1": 0.1905,
+          "False Alarm Rate": 0.0333
+        }
+      }
+    },
+    "temporal_holdout": {
+      "static_only": {
+        "Logistic Regression": {
+          "PR-AUC": 0.6416,
+          "ROC-AUC": 0.9081,
+          "Precision": 0.6,
+          "Recall": 0.3158,
+          "F1": 0.4138,
+          "False Alarm Rate": 0.0635
+        },
+        "Random Forest": {
+          "PR-AUC": 0.7792,
+          "ROC-AUC": 0.9319,
+          "Precision": 0.75,
+          "Recall": 0.4737,
+          "F1": 0.5806,
+          "False Alarm Rate": 0.0476
+        },
+        "LightGBM": {
+          "PR-AUC": 0.7762,
+          "ROC-AUC": 0.919,
+          "Precision": 0.7778,
+          "Recall": 0.3684,
+          "F1": 0.5,
+          "False Alarm Rate": 0.0317
+        }
+      },
+      "static_plus_rainfall": {
+        "Logistic Regression": {
+          "PR-AUC": 0.6439,
+          "ROC-AUC": 0.9023,
+          "Precision": 0.5455,
+          "Recall": 0.3158,
+          "F1": 0.4,
+          "False Alarm Rate": 0.0794
+        },
+        "Random Forest": {
+          "PR-AUC": 0.5949,
+          "ROC-AUC": 0.8868,
+          "Precision": 0.6,
+          "Recall": 0.3158,
+          "F1": 0.4138,
+          "False Alarm Rate": 0.0635
+        },
+        "LightGBM": {
+          "PR-AUC": 0.6926,
+          "ROC-AUC": 0.8914,
+          "Precision": 0.6923,
+          "Recall": 0.4737,
+          "F1": 0.5625,
+          "False Alarm Rate": 0.0635
+        }
+      }
+    }
+  },
+  "model_decision": {
+    "final_recommendation": "Option C: Static Susceptibility + IMERG Rainfall Thresholds + Forecast Risk",
+    "justification_reasons": [
+      "High spatial uncertainty: 78.0% of cataloged events have spatial uncertainty >= 5 km.",
+      "Limited temporal sample size: Only 72 independent event dates available for temporal training."
+    ]
+  },
+  "dataset_provenance_reference": "D:\\landslide\\sih26001-landslide-ews\\backend\\data\\processed\\training_matrix.parquet",
+  "generated_at": "2026-08-24T10:30:09Z",
+  "note": "All numbers in validation_metrics and model_comparison were computed by ml_pipeline.compute_metrics() during the run identified by dataset_provenance_reference and the companion provenance artifact. They are not copied from any documentary/historical reference figures."
+}
