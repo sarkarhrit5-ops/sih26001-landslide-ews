@@ -31,6 +31,10 @@ from app.core.config_states import (
     assert_pilot_aoi_consistency
 )
 from app.services.state_validation import get_dem_tiles_for_bbox
+from app.services.risk_inputs import (
+    LAND_COVER_ELEVATION_BREAKS_M,
+    LAND_COVER_PROXY_CLASSES
+)
 
 # THE canonical AOI for this pipeline. This is not a local definition -- it is the
 # single canonical pilot AOI from app.core.config_states.EAST_SIKKIM_PILOT_AOI.
@@ -151,17 +155,25 @@ def sample_rasters_at_points(df, raster_paths):
     return df
 
 def assign_land_cover_proxy(df):
-    # Scientifically justified land cover classification based on elevation
+    # Scientifically justified land cover classification based on elevation.
     # 1: Tree Cover / Dense Forest (<3000m)
     # 2: Shrubland / Alpine Scrub (3000-4200m)
     # 3: Bare Rock / Sparse Veg / Snow (>4200m)
+    #
+    # The class boundaries are NOT restated here: they come from
+    # app.services.risk_inputs.LAND_COVER_ELEVATION_BREAKS_M, the same constants
+    # the serving path uses. Otherwise inference could silently bin elevation
+    # differently from training and feed the model a feature it never saw.
+    lower_break, upper_break = LAND_COVER_ELEVATION_BREAKS_M
     conditions = [
-        df["elevation"] < 3000.0,
-        (df["elevation"] >= 3000.0) & (df["elevation"] < 4200.0),
-        df["elevation"] >= 4200.0
+        df["elevation"] < lower_break,
+        (df["elevation"] >= lower_break) & (df["elevation"] < upper_break),
+        df["elevation"] >= upper_break
     ]
-    choices = [1, 2, 3]
-    df["land_cover_class"] = np.select(conditions, choices, default=1).astype(np.int32)
+    choices = list(LAND_COVER_PROXY_CLASSES)
+    df["land_cover_class"] = np.select(
+        conditions, choices, default=LAND_COVER_PROXY_CLASSES[0]
+    ).astype(np.int32)
     return df
 
 def run_real_modeling_pipeline():

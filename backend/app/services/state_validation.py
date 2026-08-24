@@ -186,32 +186,51 @@ def evaluate_terrain_data(state_name: str, state_config: Dict[str, Any]) -> str:
 def evaluate_rainfall_status() -> str:
     """
     Checks Earthdata authentication status.
+
+    The wording deliberately says "Unavailable", not "Fallback Active": when
+    Earthdata authentication fails, NO substitute satellite rainfall is produced.
+    fetch_imerg_precipitation raises, and (since the antecedent-rainfall hardening)
+    fetch_historical_rainfall_series raises rather than zero-filling. Calling this
+    state a "fallback" implied a working replacement that does not exist.
     """
     try:
         get_earthdata_session()
         return "Authenticated (Satellite IMERG)"
     except PermissionError:
-        return "Fallback Active (NASA Earthdata auth missing)"
+        return "Unavailable (NASA Earthdata auth missing)"
     except Exception:
-        return "Fallback Active (Connection error)"
+        return "Unavailable (NASA Earthdata connection error)"
 
 def evaluate_state_rainfall(state_name: str, state_config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Handles rainfall authentication for a specific state.
+
+    The failure branch used to report source "Open-Meteo / Fallback Synthetic",
+    which was wrong twice over: nothing synthetic is generated anywhere in the
+    rainfall path, and Open-Meteo (used by the training pipeline for ERA5
+    antecedent series) is a real observational source, not a synthetic one. The
+    honest statement is that satellite IMERG is UNAVAILABLE for this state, with
+    the reason attached.
     """
     try:
         get_earthdata_session()
         return {
             "source": "NASA IMERG (Satellite)",
             "status": "Authenticated (Satellite IMERG)",
-            "is_fallback": False
+            "is_fallback": False,
+            "imerg_available": True,
+            "unavailable_reason": None
         }
-    except Exception:
-        print("Satellite rainfall unavailable — using fallback")
+    except Exception as exc:
+        reason = "%s: %s" % (type(exc).__name__, exc)
+        print(f"Satellite IMERG rainfall UNAVAILABLE for {state_name} ({reason}); "
+              f"no synthetic substitute is generated.")
         return {
-            "source": "Open-Meteo / Fallback Synthetic",
-            "status": "Fallback Active (Open-Meteo / Local)",
-            "is_fallback": True
+            "source": "UNAVAILABLE (NASA IMERG not authenticated; no synthetic substitute)",
+            "status": "Unavailable (NASA Earthdata authentication failed)",
+            "is_fallback": True,
+            "imerg_available": False,
+            "unavailable_reason": reason
         }
 
 def acquire_state_osm(state_name: str, state_config: Dict[str, Any]) -> str:

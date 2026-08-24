@@ -1,3 +1,11 @@
+# Runtime dependencies.
+#
+# NOTE: nothing here is installed by the hardening phases; this file only
+# DECLARES what the code already imports. scikit-learn, joblib and psutil were
+# missing while being imported by ml_pipeline (LogisticRegression /
+# RandomForestClassifier / metrics), model_artifacts (joblib for model
+# persistence) and the training script's RAM guard respectively, so a clean
+# install could not run the pipeline it claims to support.
 fastapi
 uvicorn
 pydantic
@@ -5,6 +13,9 @@ rasterio
 geopandas
 pandas
 numpy
+scikit-learn
+joblib
+psutil
 pyarrow
 shap
 lightgbm
@@ -14,3 +25,9 @@ requests
 xarray
 h5netcdf
 h5py
+
+# Test-only. pytest is what the tests/ directory is written against, and
+# fastapi.testclient.TestClient requires httpx; without it test_api.py cannot be
+# collected at all.
+pytest
+httpx

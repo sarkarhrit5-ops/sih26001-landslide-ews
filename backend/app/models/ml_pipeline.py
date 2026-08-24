@@ -255,9 +255,9 @@ def dynamic_risk_module(
     current_rainfall_mm: float,
     forecast_rainfall_mm: float,
     slope_deg: float,
-    exposure_score: float = 0.5,
-    has_real_dem: bool = True,
-    has_real_rainfall: bool = True
+    exposure_score: float = None,
+    has_real_dem: bool = False,
+    has_real_rainfall: bool = False
 ) -> dict:
     """
     Option C: Structured Risk Fusion Architecture
@@ -269,11 +269,27 @@ def dynamic_risk_module(
     - final_risk_score
     - warning_level
     - confidence
+
+    FAIL-CLOSED DEFAULTS. `exposure_score` defaults to None (unknown) rather than
+    0.5, and the two provenance flags default to False rather than True, so a
+    caller that omits them can no longer obtain a HIGH-confidence answer by
+    accident. Callers must pass the truthful flags -- see
+    app.services.risk_inputs.resolve_risk_inputs, which derives them from the
+    resolved inputs.
+
+    `exposure_score=None` and `forecast_rainfall_mm=None` mean "not measured" and
+    are echoed as null; they are never coerced to a number. Passing
+    forecast_rainfall_mm=None leaves the forecast trigger unevaluated
+    (status "missing_data") instead of asserting a 0 mm forecast. The risk
+    arithmetic itself is unchanged.
     """
     from app.models.thresholds import evaluate_rainfall_trigger
-    
+
     s_score = round(float(min(1.0, max(0.0, susceptibility_score))), 4)
-    exp_score = round(float(min(1.0, max(0.0, exposure_score))), 4)
+    exp_score = (
+        None if exposure_score is None
+        else round(float(min(1.0, max(0.0, exposure_score))), 4)
+    )
 
     # Evaluate current IMERG rainfall trigger against East Sikkim pilot-derived threshold
     current_eval = evaluate_rainfall_trigger(current_rainfall_mm, duration_hours=24.0)
@@ -282,6 +298,10 @@ def dynamic_risk_module(
     # Evaluate forecast rainfall trigger
     forecast_eval = evaluate_rainfall_trigger(forecast_rainfall_mm, duration_hours=72.0)
     forecast_trigger_score = forecast_eval["trigger_score"]
+    forecast_evaluated = forecast_rainfall_mm is not None
+    if not forecast_evaluated:
+        # Do not report an unevaluated forecast as a measured 0.0 trigger.
+        forecast_trigger_score = None
 
     # Escalation multiplier based on slope & triggers
     trigger_multiplier = 1.0
@@ -310,32 +330,132 @@ def dynamic_risk_module(
         "current_trigger_score": current_trigger_score,
         "forecast_trigger_score": forecast_trigger_score,
         "exposure_score": exp_score,
+        # Explicit provenance for the two values that used to be silently faked.
+        "exposure_score_status": "REAL" if exp_score is not None else "UNAVAILABLE",
+        "forecast_evaluated": forecast_evaluated,
         "final_risk_score": final_risk_score,
         "warning_level": warning_level,
         "confidence": confidence,
+        "inputs_are_real": {
+            "dem": bool(has_real_dem),
+            "rainfall": bool(has_real_rainfall)
+        },
         "trigger_details": {
             "current": current_eval,
             "forecast": forecast_eval
         }
     }
 
-def explain_risk(model, features):
+# Explanation status vocabulary. REAL means "computed from the persisted model by
+# SHAP"; UNAVAILABLE means exactly that, and carries the reasons.
+EXPLANATION_STATUS_REAL = "REAL"
+EXPLANATION_STATUS_UNAVAILABLE = "UNAVAILABLE"
+
+
+def explanation_unavailable(reasons):
     """
-    Calculates SHAP values or feature importance explanations.
+    The only non-SHAP result explain_risk may return. Carries no importances,
+    because inventing them is what this replaced.
     """
-    if model is not None and features is not None:
-        try:
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(features)
-            return {"status": "success", "shap_values": np.array(shap_values).tolist()}
-        except Exception:
-            pass
     return {
-        "status": "fallback",
-        "top_features": [
-            {"feature": "slope", "importance": 0.42, "description": "Steep terrain slope (>35 deg)"},
-            {"feature": "rain_3d", "importance": 0.28, "description": "High 3-day antecedent rainfall"},
-            {"feature": "roughness", "importance": 0.18, "description": "Elevated terrain ruggedness"}
-        ]
+        "status": EXPLANATION_STATUS_UNAVAILABLE,
+        "message": (
+            "No explanation can be produced from real data for this cell. "
+            "Feature importances are deliberately NOT substituted."
+        ),
+        "reasons": [str(reason) for reason in reasons],
+        "top_features": [],
     }
+
+
+def rank_shap_contributions(shap_values, feature_names):
+    """
+    Ranks features by mean absolute SHAP contribution.
+
+    Returns (top_features, note). Every importance is computed from `shap_values`.
+    If the SHAP output cannot be aligned to `feature_names`, this returns an empty
+    ranking plus an explanatory note rather than guessing an alignment.
+    """
+    from app.services.model_artifacts import FEATURE_MEANINGS
+
+    names = list(feature_names or [])
+    if not names:
+        return [], (
+            "Feature names were not supplied, so the raw shap_values could not be "
+            "attributed to named features."
+        )
+
+    array = np.abs(np.asarray(shap_values, dtype=float))
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    if array.shape[-1] != len(names):
+        return [], (
+            "SHAP output with shape %s does not align with %d feature name(s), so "
+            "no attribution is reported." % (tuple(array.shape), len(names))
+        )
+
+    means = array.reshape(-1, array.shape[-1]).mean(axis=0)
+    ranked = sorted(
+        (
+            {
+                "feature": name,
+                "importance": round(float(mean), 6),
+                "description": FEATURE_MEANINGS.get(name, "No recorded description."),
+            }
+            for name, mean in zip(names, means)
+        ),
+        key=lambda item: item["importance"],
+        reverse=True,
+    )
+    return ranked, None
+
+
+def explain_risk(model, features, feature_names=None):
+    """
+    Real SHAP explanation, or an explicit UNAVAILABLE status naming the reason.
+
+    THERE IS NO HARDCODED FALLBACK. This function used to return invented feature
+    importances (slope 0.42 / rain_3d 0.28 / roughness 0.18) whenever a model or a
+    feature vector was absent, and it swallowed SHAP failures into that same
+    branch. Because the only caller passed (None, None), every explanation the API
+    ever served was fabricated. Callers must now handle
+    EXPLANATION_STATUS_UNAVAILABLE.
+
+    `top_features` is always present (possibly empty) so the response shape is
+    stable, and every importance in it is computed from the SHAP output.
+    """
+    reasons = []
+    if model is None:
+        reasons.append(
+            "No persisted model was supplied, so no SHAP explainer can be built. "
+            "A validated model artifact must exist (see "
+            "app.services.model_artifacts.load_model_evidence)."
+        )
+    if features is None:
+        reasons.append(
+            "No real feature vector was supplied, so there is nothing to explain."
+        )
+    if reasons:
+        return explanation_unavailable(reasons)
+
+    try:
+        explainer = shap.TreeExplainer(model)
+        shap_values = np.asarray(explainer.shap_values(features), dtype=float)
+    except Exception as exc:
+        # Deliberately reported, not swallowed: a broken explainer must not look
+        # like a successful explanation.
+        return explanation_unavailable([
+            "SHAP explanation failed: %s: %s" % (type(exc).__name__, exc)
+        ])
+
+    top_features, ranking_note = rank_shap_contributions(shap_values, feature_names)
+    result = {
+        "status": EXPLANATION_STATUS_REAL,
+        "source": "shap.TreeExplainer over the persisted model",
+        "shap_values": shap_values.tolist(),
+        "top_features": top_features,
+    }
+    if ranking_note:
+        result["note"] = ranking_note
+    return result
 
