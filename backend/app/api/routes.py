@@ -175,10 +175,23 @@ def explain_cell_risk(cell_id: str, lat: Optional[float] = None, lon: Optional[f
 
 @router.get("/exposure/alerts")
 def get_exposure_alerts():
+    # NOTE: mock_get_osm_assets() returns a small hand-written fixture, NOT a real
+    # OSM/Overpass query. The response is explicitly marked as such so a consumer
+    # cannot mistake these placeholder assets for measured exposure data. The
+    # provenance fields are additive and do not change the `exposed_assets` shape.
     assets = mock_get_osm_assets()
     assets["geometry"] = assets["geometry"].apply(lambda geom: geom.wkt)
     alert_list = assets.to_dict(orient="records")
-    return {"exposed_assets": alert_list}
+    return {
+        "exposed_assets": alert_list,
+        "data_source": "MOCK_FIXTURE",
+        "is_mock": True,
+        "provenance": (
+            "SYNTHETIC PLACEHOLDER exposure fixture (app.services.exposure."
+            "mock_get_osm_assets); not a real OSM/Overpass query. Do not treat "
+            "as measured exposure."
+        ),
+    }
 
 
 @router.get("/validation/status")

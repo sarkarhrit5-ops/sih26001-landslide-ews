@@ -77,10 +77,13 @@ def fetch_open_meteo_forecast(lat: float, lon: float, hours: int = 72):
         "precipitation_mm": data["hourly"]["precipitation"]
     })
     
-    # Calculate cumulative forecast
+    # Calculate cumulative forecast. An empty or entirely-missing window raises
+    # rather than summing to a fabricated 0 mm "no rain expected" forecast.
     future_precip = df[df["time"] > pd.Timestamp.now(tz=df["time"].dt.tz)]
-    cumulative = future_precip.head(hours)["precipitation_mm"].sum()
-    
+    cumulative = _accumulate_forecast_precipitation(
+        future_precip.head(hours)["precipitation_mm"].values
+    )
+
     return cumulative
 
 import xarray as xr
@@ -96,6 +99,65 @@ def get_imerg_indices(bounds: dict):
     lon_min_idx = max(0, int(round((bounds['min_lon'] + 179.95) * 10)))
     lon_max_idx = min(3599, int(round((bounds['max_lon'] + 179.95) * 10)))
     return lat_min_idx, lat_max_idx, lon_min_idx, lon_max_idx
+
+# IMERG marks missing / no-data cells either with NaN or with large-magnitude
+# negative fill sentinels (~ -9999.9). Physical precipitation is always >= 0, so
+# any value at or below this floor is a fill/no-data marker, never a measurement.
+IMERG_FILL_VALUE_FLOOR_MM = -100.0
+
+
+def _mean_valid_precipitation(values) -> float:
+    """
+    Mean IMERG precipitation over the physically-valid cells of a retrieved subset.
+
+    Averaging blindly -- or clamping a NaN/negative mean up to 0.0, as the previous
+    code did with ``max(0.0, mean_precip)`` -- silently fabricates a "0 mm"
+    measurement out of a retrieval that actually contained no usable data (every
+    cell NaN, or every cell equal to the ~-9999.9 fill sentinel). Instead we keep
+    only finite, non-sentinel cells and RAISE when none remain, so a no-data subset
+    surfaces as an error rather than as fabricated dry weather.
+
+    The only clamp retained squashes tiny negative numerical noise on genuinely
+    valid, near-zero cells up to exactly 0.0. A genuine all-zero (dry) subset is a
+    real measurement and is preserved as 0.0.
+    """
+    import numpy as np
+
+    arr = np.asarray(values, dtype="float64").ravel()
+    valid = arr[np.isfinite(arr) & (arr > IMERG_FILL_VALUE_FLOOR_MM)]
+    if valid.size == 0:
+        raise ValueError(
+            "IMERG subset contained no physically-valid precipitation cells "
+            "(every value was NaN or a fill/no-data sentinel <= "
+            f"{IMERG_FILL_VALUE_FLOOR_MM} mm); refusing to report a fabricated "
+            "0 mm accumulation."
+        )
+    return max(0.0, float(valid.mean()))
+
+
+def _accumulate_forecast_precipitation(values) -> float:
+    """
+    Sum a forecast precipitation window, refusing to fabricate a 0 mm forecast
+    from an empty or entirely-missing series.
+
+    Open-Meteo returns one precipitation value per hour and may use null for a
+    gap. A bare ``.sum()`` treats an all-null (or empty) window as 0.0, which is
+    indistinguishable from a confident "no rain expected". We therefore require at
+    least one finite value in the window and RAISE otherwise; individual interior
+    gaps still contribute nothing, but a window with no usable value at all is an
+    error, not a dry forecast.
+    """
+    import numpy as np
+
+    arr = np.asarray(list(values), dtype="float64").ravel()
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        raise ValueError(
+            "forecast precipitation window contained no usable (finite) values; "
+            "refusing to report a fabricated 0 mm forecast accumulation."
+        )
+    return max(0.0, float(finite.sum()))
+
 
 def _fetch_imerg_day(session: requests.Session, date: datetime, bounds: dict, run_type: str = "Early") -> float:
     """
@@ -137,14 +199,23 @@ def _fetch_imerg_day(session: requests.Session, date: datetime, bounds: dict, ru
             tmp_path = tmp.name
             
         try:
-            # Parse NetCDF4 using xarray
+            # Parse NetCDF4 using xarray. Keep the raw cell values so the mean can
+            # be taken over physically-valid cells only (see _mean_valid_precipitation).
             with xr.open_dataset(tmp_path, engine="h5netcdf") as ds:
-                # Extract mean precipitation across the requested bounding box
-                mean_precip = float(ds['precipitationCal'].mean().values)
+                precip_values = ds['precipitationCal'].values
         finally:
             os.remove(tmp_path)
-            
-        return max(0.0, mean_precip) # Ensure no negative values from fill data anomalies
+
+        try:
+            # A subset that is entirely NaN or fill/no-data sentinels raises here,
+            # so a no-data retrieval surfaces as an error instead of being clamped
+            # to a fabricated 0 mm accumulation.
+            return _mean_valid_precipitation(precip_values)
+        except ValueError as no_data:
+            raise RuntimeError(
+                f"EARTHDATA IMERG NO-DATA for {date.strftime('%Y-%m-%d')} "
+                f"({run_type}): {no_data}"
+            )
         
     except requests.RequestException as e:
         raise RuntimeError(f"EARTHDATA IMERG FETCH FAILED for {date.strftime('%Y-%m-%d')} ({run_type}): {str(e)}")

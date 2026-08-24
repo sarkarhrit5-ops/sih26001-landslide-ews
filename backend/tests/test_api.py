@@ -133,6 +133,11 @@ def test_exposure_alerts():
     data = response.json()
     assert "exposed_assets" in data
     assert len(data["exposed_assets"]) > 0
+    # The payload is a hand-written fixture, not a real OSM/Overpass query, and
+    # must say so explicitly so it cannot be mistaken for measured exposure data.
+    assert data["is_mock"] is True
+    assert data["data_source"] == "MOCK_FIXTURE"
+    assert "not a real OSM" in data["provenance"]
 
 def test_validation_status_endpoint():
     response = client.get("/api/v1/validation/status")

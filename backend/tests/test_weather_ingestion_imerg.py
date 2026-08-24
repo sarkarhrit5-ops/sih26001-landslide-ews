@@ -9,7 +9,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.services.weather_ingestion import (
     get_earthdata_session,
     fetch_imerg_precipitation,
-    get_imerg_indices
+    get_imerg_indices,
+    _mean_valid_precipitation,
+    _accumulate_forecast_precipitation,
 )
 import requests
 import xarray as xr
@@ -103,3 +105,58 @@ def test_fetch_imerg_precipitation_missing_credentials_raises():
         bounds = {"min_lat": 27.0, "max_lat": 28.2, "min_lon": 88.0, "max_lon": 89.0}
         with pytest.raises(PermissionError):
             fetch_imerg_precipitation(bounds, datetime(2023, 6, 1))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2F: missing IMERG / forecast data must not become a fabricated 0 mm
+# ---------------------------------------------------------------------------
+# These exercise the pure precipitation-reduction helpers directly, so they need
+# neither the network, Earthdata credentials nor a real NetCDF file -- only numpy.
+# Previously `_fetch_imerg_day` did `max(0.0, mean_precip)`, which turned an
+# all-NaN or all-fill-sentinel subset (and any negative fill anomaly) into a
+# confident 0 mm "measurement".
+
+def test_mean_valid_precipitation_ignores_fill_sentinels():
+    # Two cells carry the ~-9999.9 fill sentinel; two are real.
+    values = np.array([[-9999.9, 2.0], [4.0, -9999.9]])
+    # Mean is over the real cells (2.0, 4.0) = 3.0, NOT dragged negative by the
+    # sentinels and clamped up to 0.0.
+    assert _mean_valid_precipitation(values) == 3.0
+
+def test_mean_valid_precipitation_averages_real_cells():
+    assert _mean_valid_precipitation(np.array([10.0, 20.0, 30.0])) == 20.0
+
+def test_mean_valid_precipitation_all_fill_raises_not_zero():
+    with pytest.raises(ValueError):
+        _mean_valid_precipitation(np.array([-9999.9, -9999.9, -9999.9]))
+
+def test_mean_valid_precipitation_all_nan_raises_not_zero():
+    with pytest.raises(ValueError):
+        _mean_valid_precipitation(np.array([np.nan, np.nan]))
+
+def test_mean_valid_precipitation_clamps_only_tiny_negative_noise():
+    # A genuinely-valid near-zero cell that dipped slightly negative from numerical
+    # noise is clamped up to exactly 0.0 -- the one legitimate use of the clamp.
+    assert _mean_valid_precipitation(np.array([-1e-9])) == 0.0
+
+def test_mean_valid_precipitation_real_dry_subset_is_preserved():
+    # An honest dry day (all real 0.0 cells) is a measurement, not no-data.
+    assert _mean_valid_precipitation(np.array([0.0, 0.0, 0.0])) == 0.0
+
+def test_accumulate_forecast_precipitation_sums_finite_hours():
+    assert _accumulate_forecast_precipitation([1.0, 2.0, 3.0]) == 6.0
+
+def test_accumulate_forecast_precipitation_empty_window_raises():
+    with pytest.raises(ValueError):
+        _accumulate_forecast_precipitation([])
+
+def test_accumulate_forecast_precipitation_all_null_raises_not_zero():
+    # Open-Meteo may return null for a gap; an ALL-null window must not sum to a
+    # confident 0 mm forecast.
+    with pytest.raises(ValueError):
+        _accumulate_forecast_precipitation([np.nan, np.nan])
+
+def test_accumulate_forecast_precipitation_interior_gap_contributes_zero():
+    # A single interior gap is tolerated (contributes nothing) as long as the
+    # window still has a real value.
+    assert _accumulate_forecast_precipitation([1.0, np.nan, 2.0]) == 3.0
