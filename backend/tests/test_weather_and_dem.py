@@ -46,3 +46,52 @@ def test_terrain_derivative_calculations():
     assert tpi.shape == (3, 3)
     assert np.all(slope >= 0.0)
     assert np.all((aspect >= 0.0) & (aspect <= 360.0))
+
+# ---------------------------------------------------------------------------
+# Phase 2F-1: DEM cell size must be supplied explicitly, never silently defaulted
+# ---------------------------------------------------------------------------
+# calculate_slope/aspect/gradients previously defaulted to cell_size=30.0, so a
+# caller that forgot the DEM's real ground resolution silently received terrain
+# derivatives scaled to a fabricated 30 m grid (wrong for any non-30 m DEM). The
+# cell size is now REQUIRED and validated; these tests need only numpy.
+
+def test_calculate_slope_requires_explicit_cell_size():
+    dem = np.zeros((3, 3), dtype=np.float32)
+    with pytest.raises(TypeError):
+        calculate_slope(dem)  # no silent 30 m assumption
+
+def test_calculate_aspect_requires_explicit_cell_size():
+    dem = np.zeros((3, 3), dtype=np.float32)
+    with pytest.raises(TypeError):
+        calculate_aspect(dem)
+
+def test_calculate_slope_rejects_nonpositive_cell_size():
+    dem = np.zeros((3, 3), dtype=np.float32)
+    for bad in (0.0, -30.0):
+        with pytest.raises(ValueError):
+            calculate_slope(dem, cell_size=bad)
+
+def test_calculate_slope_rejects_nonfinite_cell_size():
+    dem = np.zeros((3, 3), dtype=np.float32)
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            calculate_slope(dem, cell_size=bad)
+
+def test_calculate_slope_rejects_non_numeric_cell_size():
+    dem = np.zeros((3, 3), dtype=np.float32)
+    for bad in (None, "abc"):
+        with pytest.raises(ValueError):
+            calculate_slope(dem, cell_size=bad)
+
+def test_calculate_slope_uses_the_supplied_cell_size():
+    # A plane rising 10 m per column and flat along rows has gradient 1.0 with a
+    # 10 m cell -> exactly 45 degrees. The removed 30 m default would have produced
+    # ~18.43 degrees, so this pins the result to the cell size actually supplied.
+    dem = np.array([
+        [0.0, 10.0, 20.0],
+        [0.0, 10.0, 20.0],
+        [0.0, 10.0, 20.0],
+    ], dtype=np.float32)
+    slope = calculate_slope(dem, cell_size=10.0)
+    assert slope.shape == (1, 1)
+    assert abs(float(slope[0, 0]) - 45.0) < 1e-3

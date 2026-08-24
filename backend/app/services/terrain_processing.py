@@ -3,10 +3,40 @@ import rasterio
 from rasterio.windows import Window
 import math
 
-def calculate_gradients(dem_array, cell_size=30.0):
+def _require_valid_cell_size(cell_size):
+    """
+    Validate an explicitly-supplied DEM cell size (ground resolution, in metres).
+
+    Slope/aspect/gradient values are only physically meaningful when scaled by the
+    DEM's true ground resolution. These functions previously carried a hard-coded
+    default cell size of 30 m, so a caller that forgot to pass the real resolution
+    would silently receive terrain derivatives scaled to a fabricated 30 m grid --
+    wrong for any DEM that is not exactly 30 m. The cell size is therefore now a
+    REQUIRED argument and must be a finite, strictly-positive real number. Anything
+    else (missing, None, non-numeric, boolean, NaN/inf, zero or negative) raises,
+    rather than producing a plausible-but-fabricated measurement.
+    """
+    if isinstance(cell_size, bool):
+        raise ValueError(
+            f"cell_size must be a positive number of metres, not a boolean: {cell_size!r}"
+        )
+    try:
+        value = float(cell_size)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"cell_size must be an explicit positive number of metres, got {cell_size!r}"
+        )
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"cell_size must be finite and strictly positive (metres), got {cell_size!r}"
+        )
+    return value
+
+def calculate_gradients(dem_array, cell_size):
     """
     Calculates dz/dx and dz/dy gradients using Horn's 3x3 window method.
     """
+    cell_size = _require_valid_cell_size(cell_size)
     z = dem_array.astype(np.float32)
     dz_dx = ((z[2:, 2:] + 2 * z[1:-1, 2:] + z[:-2, 2:]) - 
              (z[2:, :-2] + 2 * z[1:-1, :-2] + z[:-2, :-2])) / (8 * cell_size)
@@ -15,7 +45,7 @@ def calculate_gradients(dem_array, cell_size=30.0):
              (z[:-2, 2:] + 2 * z[:-2, 1:-1] + z[:-2, :-2])) / (8 * cell_size)
     return dz_dx, dz_dy
 
-def calculate_slope(dem_array, cell_size=30.0):
+def calculate_slope(dem_array, cell_size):
     """
     Calculates slope in degrees using Horn's 3x3 method.
     """
@@ -24,7 +54,7 @@ def calculate_slope(dem_array, cell_size=30.0):
     slope_deg = np.degrees(slope_rad)
     return slope_deg
 
-def calculate_aspect(dem_array, cell_size=30.0):
+def calculate_aspect(dem_array, cell_size):
     """
     Calculates aspect in degrees (0 to 360, 0 = North, clockwise).
     """
