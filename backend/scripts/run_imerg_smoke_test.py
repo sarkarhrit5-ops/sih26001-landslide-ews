@@ -1,7 +1,8 @@
+import argparse
 import os
 import sys
 import psutil
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -14,7 +15,20 @@ def print_ram(stage):
     print(f"[{stage}] RAM Usage: {mem:.2f} MB")
     return mem
 
-def run_smoke_test():
+DEFAULT_PROBE_DATE = "2025-09-18"  # known-available in-range IMERG Early (V07) date; override with --date
+
+
+def _parse_date(value):
+    """Parse a YYYY-MM-DD probe date; argparse-friendly error on bad input."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "invalid date %r: expected YYYY-MM-DD (e.g. %s)" % (value, DEFAULT_PROBE_DATE)
+        )
+
+
+def run_smoke_test(test_date):
     print("==================================================")
     print("      NASA IMERG AUTHENTICATED SMOKE TEST         ")
     print("==================================================")
@@ -46,8 +60,6 @@ def run_smoke_test():
     
     # Target: the canonical East Sikkim pilot AOI (not restated here)
     bounds = get_pilot_aoi_bounds("Sikkim")
-    # Pick a recent date
-    test_date = datetime.now() - timedelta(days=7) 
     
     try:
         print(f"Initiating fetch for {test_date.strftime('%Y-%m-%d')} with 1/3/7 day accumulations...")
@@ -63,6 +75,23 @@ def run_smoke_test():
         print(f"\nPeak RAM Usage: {max(peak_ram):.2f} MB (Constraint: 8000 MB)")
     except Exception as e:
         print(f"\nERROR during smoke test: {e}")
+        print("(A 404 means no IMERG Early granule exists for that date yet -- pick an "
+              "in-range date with --date YYYY-MM-DD, e.g. 2025-09-18.)")
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="NASA IMERG authenticated smoke test (real GES DISC OPeNDAP fetch)."
+    )
+    parser.add_argument(
+        "--date",
+        type=_parse_date,
+        default=DEFAULT_PROBE_DATE,
+        help="probe date YYYY-MM-DD (default %(default)s); must be an available IMERG "
+             "Early granule date -- future/too-recent dates return HTTP 404.",
+    )
+    args = parser.parse_args(argv)
+    run_smoke_test(args.date)
+
 
 if __name__ == "__main__":
-    run_smoke_test()
+    main()

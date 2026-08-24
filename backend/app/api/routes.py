@@ -13,11 +13,12 @@ app.services.risk_inputs and return HTTP 503 with a structured
 DATA_UNAVAILABLE body when any required measurement is absent.
 """
 
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from app.models.ml_pipeline import dynamic_risk_module, explain_risk
-from app.services import risk_inputs
+from app.services import pilot_events, risk_inputs, sikkim_prediction
 from app.services.exposure import mock_get_osm_assets
 
 router = APIRouter()
@@ -211,3 +212,182 @@ def get_validation_status():
         return reconcile_validation_report(records)
     else:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Read-only Sikkim pilot evidence endpoints (ADDITIVE).
+#
+# These serve ONLY real, already-persisted artifacts and the real AOI-filtered
+# landslide inventory. They do not compute, retrain, download, or fabricate
+# anything. They expose what the reproduction run already wrote to disk:
+#   * the persisted model-evidence bundle under backend/data/models/
+#     (sikkim_metrics.json / sikkim_feature_schema.json / sikkim_provenance.json),
+#     read through app.services.model_artifacts.verify_artifact_set(), which
+#     returns an honest MISSING / INVALID / VALID verdict and never substitutes
+#     hardcoded numbers; and
+#   * the NASA Global Landslide Catalog positives inside the canonical pilot AOI,
+#     resolved by app.services.pilot_events (snapshot-first, raw-CSV fallback)
+#     using the EXACT filter used by scripts/train_real_models.py (bbox from
+#     config_states.get_pilot_aoi_bounds -> drop rows with no event_date ->
+#     de-duplicate on (latitude, longitude, event_date)). This yields the same
+#     82 events recorded in sikkim_provenance.json (glc_event_count = 82).
+# ---------------------------------------------------------------------------
+
+# Fields copied verbatim from the persisted evidence bundle. Absolute filesystem
+# paths recorded inside the artifacts (dataset_artifact /
+# dataset_provenance_reference) are deliberately NOT exposed by the API.
+_EVIDENCE_METRICS_FIELDS = (
+    "validation_metrics", "metrics_source", "status", "primary_model",
+    "primary_evaluation", "feature_set", "holdout_details", "sample_counts",
+    "model_comparison", "model_decision", "generated_at",
+)
+_EVIDENCE_SCHEMA_FIELDS = (
+    "feature_set_name", "feature_names", "feature_order", "n_features",
+    "dtype", "meaning", "target_column",
+)
+_EVIDENCE_PROVENANCE_FIELDS = (
+    "aoi", "glc_source", "glc_event_count", "sample_counts", "rainfall_source",
+    "dem_source", "terrain_derivative_method", "exposure_source", "model_type",
+    "model_hyperparameters", "model_serialization", "feature_list",
+    "spatial_split", "temporal_split", "negative_sampling", "leakage_controls",
+    "random_seed", "code_version", "software_versions", "input_status",
+    "generation_timestamp", "additional_context",
+)
+
+
+def _pick(doc, fields):
+    """Whitelisted, JSON-safe projection of a persisted artifact document."""
+    if not isinstance(doc, dict):
+        return None
+    return {key: doc[key] for key in fields if key in doc}
+
+
+@router.get("/validation/sikkim/evidence")
+def get_sikkim_evidence():
+    """
+    Serve the persisted Sikkim model-evidence bundle, read-only.
+
+    Mirrors the honesty of /cell/{id}/explain: returns HTTP 200 with an explicit
+    `status` ("VALID" / "MISSING" / "INVALID") rather than an error status, so the
+    response shape stays valid and the caller is told exactly what is on disk. All
+    numbers are read from the artifacts written by the reproduction run; this
+    endpoint never computes, defaults, or back-fills a value.
+    """
+    from app.services import model_artifacts
+    verdict = model_artifacts.verify_artifact_set(
+        state_name="Sikkim", require_full_metrics=False
+    )
+    return {
+        "state": "Sikkim",
+        "pilot_area": "East Sikkim",
+        "status": verdict["status"],
+        "gate_compatible": verdict["gate_compatible"],
+        "problems": verdict["problems"],
+        "metrics": _pick(verdict.get("metrics"), _EVIDENCE_METRICS_FIELDS),
+        "feature_schema": _pick(verdict.get("feature_schema"), _EVIDENCE_SCHEMA_FIELDS),
+        "provenance": _pick(verdict.get("provenance"), _EVIDENCE_PROVENANCE_FIELDS),
+    }
+
+
+@router.get("/validation/sikkim/events")
+def get_sikkim_events():
+    """
+    The real NASA GLC landslide positives inside the canonical East Sikkim pilot
+    AOI -- the exact inventory the pilot model was trained on.
+
+    Delegates to app.services.pilot_events, which serves the committed validated
+    snapshot (data/models/sikkim_events.json) when present and otherwise filters
+    the raw GLC catalog live. Refuses with HTTP 503 DATA_UNAVAILABLE only when
+    BOTH real sources are absent, rather than returning an empty or synthesised
+    list.
+    """
+    aoi, events, precise, source_artifact = pilot_events.resolve_pilot_events()
+    if events is None:
+        raise HTTPException(
+            status_code=DATA_UNAVAILABLE_STATUS_CODE,
+            detail={
+                "status": "DATA_UNAVAILABLE",
+                "reason": (
+                    "No real Sikkim landslide inventory is available on the "
+                    "server: neither the committed events snapshot "
+                    "(data/models/sikkim_events.json) nor the raw NASA GLC "
+                    "catalog (data/raw/glc_legacy.csv) is present."
+                ),
+                "aoi": aoi,
+            },
+        )
+    if source_artifact == "validated_snapshot":
+        served_from = (
+            " Served from the committed validated snapshot "
+            "(data/models/sikkim_events.json)."
+        )
+    else:
+        served_from = " Served live from the raw catalog (data/raw/glc_legacy.csv)."
+    return {
+        "state": "Sikkim",
+        "pilot_area": "East Sikkim",
+        "aoi": aoi,
+        "count": len(events),
+        "source": (
+            "NASA Global Landslide Catalog (glc_legacy.csv), AOI-filtered; "
+            "de-duplicated on (latitude, longitude, event_date)." + served_from
+        ),
+        "source_artifact": source_artifact,
+        "spatial_uncertainty_summary": pilot_events.spatial_uncertainty_summary(
+            events, precise
+        ),
+        "events": events,
+    }
+
+
+@router.get("/predict/sikkim/grid")
+def predict_sikkim_grid(date: Optional[str] = None,
+                        step: float = sikkim_prediction.DEFAULT_STEP_DEG,
+                        run_type: str = "Early"):
+    """
+    Real per-grid-cell landslide susceptibility for the East Sikkim pilot AOI.
+
+    Runs the persisted 11-feature LightGBM (real terrain + elevation-proxy land
+    cover + real IMERG antecedent rainfall) over a coarse grid tiling the AOI and
+    returns, per cell, the model's RAW susceptibility probability and the system
+    warning class. This is NOT the Option-C fused /risk/current score -- see the
+    response `disclosures`. Read-only; it fabricates nothing and back-fills no
+    cell: a cell with missing/nodata terrain comes back status UNAVAILABLE with no
+    probability.
+
+    Query params:
+      * date     -- optional prediction date 'YYYY-MM-DD' (default: today, UTC).
+                    Rainfall is the antecedent T-1..T-14 window, so `date` itself
+                    need not be in the catalog, only its preceding 14 days.
+      * step     -- grid cell size in degrees (default is a coarse grid; the range
+                    and a max cell count are enforced by the service).
+      * run_type -- IMERG run: Early (default), Late or Final.
+
+    Refuses with HTTP 503 DATA_UNAVAILABLE when the model artifacts or the real
+    rainfall cannot be obtained, and HTTP 400 for a bad `date` or `step`.
+    """
+    if date is None:
+        target_date = datetime.utcnow()
+    else:
+        try:
+            target_date = datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
+            )
+    try:
+        return sikkim_prediction.predict_sikkim_grid(
+            target_date, step_deg=step, run_type=run_type,
+        )
+    except sikkim_prediction.PredictionUnavailable as exc:
+        raise HTTPException(
+            status_code=DATA_UNAVAILABLE_STATUS_CODE,
+            detail={
+                "status": "DATA_UNAVAILABLE",
+                "reason": exc.reason,
+                "details": exc.details,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

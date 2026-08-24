@@ -3,9 +3,38 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 import os
+from urllib.parse import urlparse
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
+
+class _EarthdataAuthSession(requests.Session):
+    """
+    requests.Session that keeps the Bearer token across NASA Earthdata redirects.
+
+    A protected GES DISC data URL (gpm1.gesdisc.eosdis.nasa.gov) answers an
+    unauthenticated request with a 302 to urs.earthdata.nasa.gov and then back to a
+    NASA data host. requests strips the Authorization header on ANY cross-host
+    redirect (its should_strip_auth security default), so the Bearer token set in
+    get_earthdata_session() is dropped before it ever reaches URS and the retry
+    returns HTTP 401. We keep the header ONLY when BOTH the previous and the next
+    host are NASA Earthdata / EOSDIS hosts, and still strip it for any other host.
+    """
+
+    _TRUSTED_HOSTS = ("earthdata.nasa.gov", "eosdis.nasa.gov")
+
+    @classmethod
+    def _is_trusted(cls, host):
+        host = (host or "").lower()
+        return any(host == d or host.endswith("." + d) for d in cls._TRUSTED_HOSTS)
+
+    def should_strip_auth(self, old_url, new_url):
+        if self._is_trusted(urlparse(old_url).hostname) and self._is_trusted(
+            urlparse(new_url).hostname
+        ):
+            return False
+        return super().should_strip_auth(old_url, new_url)
+
 
 def get_earthdata_session():
     """
@@ -23,7 +52,7 @@ def get_earthdata_session():
             "Cannot authenticate with urs.earthdata.nasa.gov to access real IMERG rainfall data."
         )
     
-    session = requests.Session()
+    session = _EarthdataAuthSession()
     if token:
         session.headers.update({"Authorization": f"Bearer {token}"})
     else:
@@ -183,8 +212,13 @@ def _fetch_imerg_day(session: requests.Session, date: datetime, bounds: dict, ru
     lat_min, lat_max, lon_min, lon_max = get_imerg_indices(bounds)
     
     # OPeNDAP constraint query: var[time][lon][lat]
-    # IMERG dimensions: time (1), lon (3600), lat (1800)
-    query = f"?precipitationCal[0:0][{lon_min}:{lon_max}][{lat_min}:{lat_max}]"
+    # V07 renamed the daily calibrated field 'precipitationCal' (V06) ->
+    # 'precipitation'; requesting the old name returns HTTP 400 (variable not
+    # found) even for an existing granule. IMERG dimensions: time (1),
+    # lon (3600), lat (1800). If a V07 granule instead declares
+    # precipitation[time][lat][lon] (confirm via the granule .dds), the two
+    # index groups below must be swapped to match the declared order.
+    query = f"?precipitation[0:0][{lon_min}:{lon_max}][{lat_min}:{lat_max}]"
     url = f"{base_url}.nc4{query}"
     
     try:
@@ -202,7 +236,7 @@ def _fetch_imerg_day(session: requests.Session, date: datetime, bounds: dict, ru
             # Parse NetCDF4 using xarray. Keep the raw cell values so the mean can
             # be taken over physically-valid cells only (see _mean_valid_precipitation).
             with xr.open_dataset(tmp_path, engine="h5netcdf") as ds:
-                precip_values = ds['precipitationCal'].values
+                precip_values = ds['precipitation'].values
         finally:
             os.remove(tmp_path)
 

@@ -68,6 +68,57 @@
   animation: pulse-ring 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
+/* Signature: contour-line draw for the brand mark on the welcome hero */
+.brk-draw path {
+  stroke-dasharray: 60;
+  stroke-dashoffset: 60;
+  animation: brk-contour-draw 1.8s ease forwards;
+}
+.brk-draw path:nth-child(2) {
+  animation-delay: 0.35s;
+}
+@keyframes brk-contour-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Slow drifting scan sweep for the hero topography */
+@keyframes brk-scan {
+  0% { transform: translateY(-10%); opacity: 0; }
+  15% { opacity: 0.7; }
+  85% { opacity: 0.7; }
+  100% { transform: translateY(110%); opacity: 0; }
+}
+.brk-scan-line {
+  animation: brk-scan 7s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Staggered fade-rise for hero content on load */
+@keyframes brk-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.brk-rise {
+  opacity: 0;
+  animation: brk-rise 0.7s ease forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brk-draw path,
+  .brk-scan-line,
+  .brk-rise,
+  .animate-pulse-ring {
+    animation: none;
+  }
+  .brk-draw path {
+    stroke-dashoffset: 0;
+  }
+  .brk-rise {
+    opacity: 1;
+  }
+}
+
 /* Custom subtle scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

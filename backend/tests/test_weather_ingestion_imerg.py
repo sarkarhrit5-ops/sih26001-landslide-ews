@@ -76,7 +76,7 @@ def test_fetch_imerg_day_parsing(mock_session_func, mock_get):
     """
     # Create a dummy netcdf file in memory using xarray
     ds = xr.Dataset({
-        "precipitationCal": (["time", "lon", "lat"], [[[15.0, 25.0], [5.0, 15.0]]])
+        "precipitation": (["time", "lon", "lat"], [[[15.0, 25.0], [5.0, 15.0]]])
     })
     
     with tempfile.NamedTemporaryFile(suffix=".nc4", delete=False) as tmp:
@@ -160,3 +160,32 @@ def test_accumulate_forecast_precipitation_interior_gap_contributes_zero():
     # A single interior gap is tolerated (contributes nothing) as long as the
     # window still has a real value.
     assert _accumulate_forecast_precipitation([1.0, np.nan, 2.0]) == 3.0
+
+@patch("requests.Session.get")
+@patch.dict(os.environ, {"EARTHDATA_TOKEN": "fake_token_for_test_only"})
+def test_earthdata_session_sends_bearer_token(mock_get):
+    """The token session must carry Authorization: Bearer <token> (env-sourced)."""
+    mock_get.return_value = MagicMock(status_code=200)
+    session = get_earthdata_session()
+    assert session.headers.get("Authorization") == "Bearer fake_token_for_test_only"
+
+
+def test_earthdata_session_preserves_bearer_across_nasa_redirect():
+    """
+    GES DISC 302-redirects through urs.earthdata.nasa.gov; requests would strip the
+    Authorization header on that cross-host hop and 401. The session must KEEP the
+    bearer for NASA Earthdata/EOSDIS hosts and still DROP it for any other host.
+    """
+    from app.services.weather_ingestion import _EarthdataAuthSession
+    session = _EarthdataAuthSession()
+    gesdisc = "https://gpm1.gesdisc.eosdis.nasa.gov/opendap/GPM_L3/x.nc4"
+    urs = "https://urs.earthdata.nasa.gov/oauth/authorize"
+    other = "https://not-nasa.example.com/collect"
+    # NASA -> NASA (both directions): bearer preserved
+    assert session.should_strip_auth(gesdisc, urs) is False
+    assert session.should_strip_auth(urs, gesdisc) is False
+    # NASA -> unrelated host: bearer stripped (security default preserved)
+    assert session.should_strip_auth(gesdisc, other) is True
+    # a look-alike host must NOT be trusted
+    assert _EarthdataAuthSession._is_trusted("evil-eosdis.nasa.gov") is False
+    assert _EarthdataAuthSession._is_trusted("gpm1.gesdisc.eosdis.nasa.gov") is True
