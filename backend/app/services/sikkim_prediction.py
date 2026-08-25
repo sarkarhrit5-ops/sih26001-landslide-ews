@@ -282,29 +282,59 @@ def _derive_rainfall_features(daily):
 def _default_rainfall_provider(bounds, target_date, run_type="Early", session=None):
     """
     Derives the model's five antecedent-rainfall features from REAL IMERG daily
-    means over the pilot AOI, using the UNMODIFIED weather_ingestion helpers.
+    means over the pilot AOI.
 
-    Pulls the AOI-mean daily precipitation for T-1..T-14 (T = target_date; the
-    event day itself is excluded, matching the schema's antecedent semantics),
-    then derives the five features via _derive_rainfall_features. The same AOI-mean
-    series is applied to every cell (IMERG's ~0.1 deg grid is coarser than the
-    prediction grid), so per-cell variation is terrain-driven; this is disclosed in
-    the response. Never fabricates or zero-fills: if any day cannot be fetched,
-    weather_ingestion raises and the request is refused upstream.
+    If the requested target date is too recent for the selected IMERG run,
+    search backward for the latest available observation. No synthetic values,
+    zero-filling, or duplicated rainfall days are allowed.
     """
-    from app.services import weather_ingestion  # lazy: pulls requests/xarray on host
+    from app.services import weather_ingestion
 
     sess = session if session is not None else weather_ingestion.get_earthdata_session()
-    daily = []  # daily[k] = precip for day T-(k+1)
-    for k in range(1, RAINFALL_WINDOW_DAYS + 1):
-        day = target_date - timedelta(days=k)
-        daily.append(float(weather_ingestion._fetch_imerg_day(sess, day, bounds, run_type)))
+
+    # Find the latest available IMERG observation before the target date.
+    latest_date = None
+    max_probe_days = 30
+
+    for offset in range(1, max_probe_days + 1):
+        candidate = target_date - timedelta(days=offset)
+        try:
+            weather_ingestion._fetch_imerg_day(
+                sess, candidate, bounds, run_type
+            )
+            latest_date = candidate
+            break
+        except Exception as exc:
+            # Only continue searching for unavailable granules.
+            if "404" not in str(exc):
+                raise
+
+    if latest_date is None:
+        raise PredictionUnavailable(
+            "No available IMERG %s observation found within %d days before %s."
+            % (run_type, max_probe_days, target_date.date())
+        )
+
+    # Fetch a consecutive 14-day antecedent window ending at the
+    # latest available observation. Never duplicate a day.
+    daily = []
+    for k in range(RAINFALL_WINDOW_DAYS):
+        day = latest_date - timedelta(days=k)
+        daily.append(
+            float(
+                weather_ingestion._fetch_imerg_day(
+                    sess, day, bounds, run_type
+                )
+            )
+        )
 
     return {
         "source": "IMERG_%s" % run_type,
         "run_type": run_type,
         "aoi_uniform": True,
         "window_days": RAINFALL_WINDOW_DAYS,
+        "requested_date": target_date.strftime("%Y-%m-%d"),
+        "rainfall_observation_date": latest_date.strftime("%Y-%m-%d"),
         "daily_series_mm": [round(v, 4) for v in daily],
         "features": _derive_rainfall_features(daily),
     }
