@@ -1,0 +1,153 @@
+{
+  "schema_version": "1.0.0",
+  "state": "Assam",
+  "pilot_area": "Guwahati-Kamrup + western Karbi Anglong",
+  "aoi": {
+    "min_lat": 25.6,
+    "max_lat": 26.6,
+    "min_lon": 91.3,
+    "max_lon": 93.7
+  },
+  "matrix": {
+    "path": "backend/data/processed/assam_pilot_training_matrix.parquet",
+    "n_rows": 236,
+    "n_positives": 59,
+    "n_negatives": 177,
+    "n_model_features": 11,
+    "n_columns_total": 25
+  },
+  "feature_schema": {
+    "terrain_features": [
+      "elevation",
+      "slope",
+      "aspect",
+      "roughness",
+      "tpi"
+    ],
+    "land_cover_feature": "land_cover_class",
+    "rainfall_features": [
+      "rain_1d",
+      "rain_3d",
+      "rain_7d",
+      "antecedent_rain_14d",
+      "rain_intensity_max_3d"
+    ],
+    "ordered_model_features": [
+      "elevation",
+      "slope",
+      "aspect",
+      "roughness",
+      "tpi",
+      "land_cover_class",
+      "rain_1d",
+      "rain_3d",
+      "rain_7d",
+      "antecedent_rain_14d",
+      "rain_intensity_max_3d"
+    ],
+    "dtypes": {
+      "elevation": "float32",
+      "slope": "float32",
+      "aspect": "float32",
+      "roughness": "float32",
+      "tpi": "float32",
+      "land_cover_class": "int32",
+      "rain_1d": "float32",
+      "rain_3d": "float32",
+      "rain_7d": "float32",
+      "antecedent_rain_14d": "float32",
+      "rain_intensity_max_3d": "float32"
+    },
+    "categorical_features": [
+      "land_cover_class"
+    ],
+    "target_column": "target"
+  },
+  "missing_values": {
+    "elevation": 0,
+    "slope": 0,
+    "aspect": 0,
+    "roughness": 0,
+    "tpi": 0,
+    "land_cover_class": 0,
+    "rain_1d": 0,
+    "rain_3d": 0,
+    "rain_7d": 0,
+    "antecedent_rain_14d": 0,
+    "rain_intensity_max_3d": 0,
+    "_rows_with_any_missing_feature": 0,
+    "_landcover_unavailable_rows": 0
+  },
+  "sources": {
+    "terrain": {
+      "dem": "backend/data/raw/assam_pilot_dem.tif",
+      "derivatives": {
+        "slope": "backend/data/processed/assam_pilot_slope.tif",
+        "aspect": "backend/data/processed/assam_pilot_aspect.tif",
+        "roughness": "backend/data/processed/assam_pilot_roughness.tif",
+        "tpi": "backend/data/processed/assam_pilot_tpi.tif"
+      },
+      "sampler": "scripts/train_real_models.sample_rasters_at_points (nearest)",
+      "nodata_sentinel": -9999.0
+    },
+    "land_cover": {
+      "product": "ESA WorldCover v200 2021 (grouped, NOMINAL, categorical)",
+      "raster": "backend/data/raw/assam_pilot_landcover.tif",
+      "assigner": "app.services.worldcover.assign_assam_land_cover_from_raster",
+      "unavailable_sentinel": -1,
+      "group_labels": {
+        "1": "forest (tree cover)",
+        "2": "shrub / grass / herbaceous",
+        "3": "cropland",
+        "4": "built-up",
+        "5": "bare / sparse / snow",
+        "6": "water / wetland"
+      }
+    },
+    "rainfall": {
+      "product": "Open-Meteo ERA5 archive (daily precipitation_sum)",
+      "endpoint": "https://archive-api.open-meteo.com/v1/archive",
+      "antecedent_window_days": 14,
+      "window": "strictly T-14 .. T-1 (no future leakage)",
+      "fetcher": "scripts/train_real_models.fetch_historical_rainfall_series",
+      "on_failure": "RainfallUnavailableError aborts the build; never zero/synthetic",
+      "imerg_note": "NASA IMERG (app.services.weather_ingestion) is the serving path only; NOT a training feature; untouched"
+    }
+  },
+  "negative_sampling": {
+    "method": "app.models.ml_pipeline.generate_spatial_negative_samples",
+    "count_ratio": 3,
+    "buffer_deg": 0.05,
+    "seed": 42,
+    "domain": "canonical Assam AOI rectangle (== DEM/land-cover extent)"
+  },
+  "integrity": {
+    "fabrication": "none: terrain nodata/non-finite -> NaN; land cover nodata -> sentinel; rainfall failure aborts",
+    "rows_retained": "all positives + all negatives kept; downstream trainer must DROP missing-feature rows, never fill",
+    "land_cover_is_categorical": true
+  },
+  "aoi_consistency": {
+    "state_name": "Assam",
+    "state_bbox": {
+      "min_lat": 24.0,
+      "max_lat": 28.0,
+      "min_lon": 89.5,
+      "max_lon": 96.0
+    },
+    "pilot_aoi": {
+      "min_lat": 25.6,
+      "max_lat": 26.6,
+      "min_lon": 91.3,
+      "max_lon": 93.7
+    },
+    "pilot_within_state": true,
+    "boxes_identical": false,
+    "differing_keys": [
+      "min_lat",
+      "max_lat",
+      "min_lon",
+      "max_lon"
+    ]
+  },
+  "generated_at": "2026-08-26T08:40:02Z"
+}

@@ -1,0 +1,134 @@
+{
+  "schema_version": "1.0.0",
+  "state": "Assam",
+  "pilot_area": "Guwahati-Kamrup + western Karbi Anglong",
+  "aoi": {
+    "min_lat": 25.6,
+    "max_lat": 26.6,
+    "min_lon": 91.3,
+    "max_lon": 93.7
+  },
+  "source": {
+    "product": "ESA WorldCover",
+    "version": "v200",
+    "year": 2021,
+    "resolution": "10 m",
+    "tiles": [
+      "N24E090",
+      "N24E093"
+    ],
+    "bucket": "s3://esa-worldcover (AWS Open Data, eu-central-1, no credentials)",
+    "license": "CC-BY 4.0"
+  },
+  "raster": {
+    "path": "backend/data/raw/assam_pilot_landcover.tif",
+    "rows": 12000,
+    "cols": 28800,
+    "pixel_size_deg": 8.333333333333333e-05,
+    "epsg": 4326,
+    "dtype": "uint8",
+    "nodata": 0.0,
+    "bounds_measured_from_file": {
+      "min_lat": 25.6,
+      "max_lat": 26.6,
+      "min_lon": 91.3,
+      "max_lon": 93.7
+    },
+    "fully_covers_canonical_aoi": true
+  },
+  "grouping": {
+    "note": "WorldCover codes are NOMINAL; grouped into a small set for the 59-event dataset. land_cover_class must be treated as CATEGORICAL.",
+    "raw_code_to_group": {
+      "10": 1,
+      "20": 2,
+      "30": 2,
+      "40": 3,
+      "50": 4,
+      "60": 5,
+      "70": 5,
+      "80": 6,
+      "90": 6,
+      "95": 6,
+      "100": 2
+    },
+    "group_labels": {
+      "1": "forest (tree cover)",
+      "2": "shrub / grass / herbaceous",
+      "3": "cropland",
+      "4": "built-up",
+      "5": "bare / sparse / snow",
+      "6": "water / wetland"
+    }
+  },
+  "aoi_distribution": {
+    "raw_class_pixels": {
+      "10": 218336879,
+      "20": 50131,
+      "30": 18526133,
+      "40": 88841791,
+      "50": 5260324,
+      "60": 1294361,
+      "80": 12907047,
+      "90": 383334
+    },
+    "grouped_pixels": {
+      "1": {
+        "label": "forest (tree cover)",
+        "count": 218336879
+      },
+      "2": {
+        "label": "shrub / grass / herbaceous",
+        "count": 18576264
+      },
+      "3": {
+        "label": "cropland",
+        "count": 88841791
+      },
+      "4": {
+        "label": "built-up",
+        "count": 5260324
+      },
+      "5": {
+        "label": "bare / sparse / snow",
+        "count": 1294361
+      },
+      "6": {
+        "label": "water / wetland",
+        "count": 13290381
+      }
+    },
+    "nodata_pixels": 0,
+    "total_pixels": 345600000
+  },
+  "event_distribution": {
+    "n_events": 59,
+    "grouped": {
+      "1": {
+        "label": "forest (tree cover)",
+        "count": 32
+      },
+      "2": {
+        "label": "shrub / grass / herbaceous",
+        "count": 4
+      },
+      "3": {
+        "label": "cropland",
+        "count": 2
+      },
+      "4": {
+        "label": "built-up",
+        "count": 21
+      },
+      "5": {
+        "label": "bare / sparse / snow",
+        "count": 0
+      },
+      "6": {
+        "label": "water / wetland",
+        "count": 0
+      }
+    },
+    "unavailable_nodata_events": 0
+  },
+  "generated_at": "2026-08-26T07:24:02Z"
+}

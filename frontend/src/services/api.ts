@@ -317,6 +317,24 @@ export interface SikkimPredictionResponse {
   cells: SikkimPredictionCell[];
 }
 
+/**
+ * Assam pilot response contracts.
+ *
+ * The three Assam endpoints (/validation/assam/evidence, /validation/assam/events,
+ * /predict/assam/grid) return byte-for-byte the SAME JSON shapes as their Sikkim
+ * counterparts — the backend shares the identical field projections (_pick) and the
+ * same prediction builder — so the Assam console reuses these types via aliases
+ * rather than duplicating the definitions. The differences between the two pilots
+ * are in the *values*, not the schema: Assam's pilot_area label differs, and
+ * land_cover_class is carried as REAL ESA WorldCover (a categorical feature) rather
+ * than the Sikkim elevation-derived proxy. Those honest distinctions are surfaced by
+ * the Assam console from the live feature_schema / provenance / disclosures fields.
+ */
+export type AssamEvidenceResponse = SikkimEvidenceResponse;
+export type AssamEventsResponse = SikkimEventsResponse;
+export type AssamPredictionResponse = SikkimPredictionResponse;
+export type AssamPredictionCell = SikkimPredictionCell;
+
 class ApiService {
   private async fetchJson<T>(endpoint: string): Promise<T> {
     try {
@@ -391,6 +409,49 @@ class ApiService {
     const query = params.toString();
     return this.fetchJson<SikkimPredictionResponse>(
       `/api/v1/predict/sikkim/grid${query ? `?${query}` : ''}`,
+    );
+  }
+
+  /**
+   * Persisted Assam model-evidence bundle (metrics + feature schema + provenance).
+   * Same contract as getSikkimEvidence — returns an explicit status
+   * (VALID/MISSING/INVALID), reads every number from the persisted Assam artifacts,
+   * and never fabricates. The Assam-specific truth (land_cover_class is REAL ESA
+   * WorldCover, not an elevation proxy) is carried faithfully in feature_schema /
+   * provenance.
+   */
+  async getAssamEvidence(): Promise<AssamEvidenceResponse> {
+    return this.fetchJson<AssamEvidenceResponse>('/api/v1/validation/assam/evidence');
+  }
+
+  /**
+   * Real NASA GLC landslide positives inside the canonical Assam pilot AOI
+   * (Guwahati-Kamrup + western Karbi Anglong). Throws if the backend refuses
+   * (HTTP 503 DATA_UNAVAILABLE) rather than returning a synthesised list.
+   */
+  async getAssamEvents(): Promise<AssamEventsResponse> {
+    return this.fetchJson<AssamEventsResponse>('/api/v1/validation/assam/events');
+  }
+
+  /**
+   * Real per-grid-cell landslide susceptibility for the Assam pilot AOI, produced by
+   * running the persisted 11-feature Assam LightGBM over a coarse grid with real ESA
+   * WorldCover land cover (categorical) and real IMERG antecedent rainfall. This is
+   * the model's RAW probability, not the Option-C fused score (see
+   * response.disclosures, which also record the ERA5-trained → IMERG-served rainfall
+   * shift). Throws if the backend refuses (HTTP 503 DATA_UNAVAILABLE) rather than
+   * returning fabricated risk zones.
+   *
+   * @param date optional 'YYYY-MM-DD' prediction date (default: backend uses today, UTC)
+   * @param step optional grid cell size in degrees (default: backend coarse grid)
+   */
+  async getAssamPrediction(date?: string, step?: number): Promise<AssamPredictionResponse> {
+    const params = new URLSearchParams();
+    if (date) params.set('date', date);
+    if (step != null) params.set('step', String(step));
+    const query = params.toString();
+    return this.fetchJson<AssamPredictionResponse>(
+      `/api/v1/predict/assam/grid${query ? `?${query}` : ''}`,
     );
   }
 }

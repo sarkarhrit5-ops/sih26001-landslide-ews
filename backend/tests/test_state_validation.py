@@ -324,3 +324,154 @@ def test_state_rainfall_available_is_not_fallback():
     assert info["imerg_available"] is True
     assert info["is_fallback"] is False
     assert info["unavailable_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# Serve-time Assam refresh (refresh_assam_data_status)
+# ---------------------------------------------------------------------------
+# state_validation.json was written by an early NER sweep, before any Assam
+# artifact existed, so its Assam record reports dem/exposure "Missing" and model
+# "Not Trained". reconcile_validation_report only downgrades unbacked
+# VALIDATED_PILOT claims, and determine_overall_status only consults the model
+# evidence gate for is_pilot states (Assam is is_pilot=False), so neither lifts
+# the stale values. refresh_assam_data_status closes that gap for ASSAM ONLY,
+# recomputing each field from a real on-disk artifact. These tests drive the DEM
+# and model-evidence branches off TEMP directories (so they never depend on the
+# checkout's large rasters); exposure is asserted to agree with the existing
+# evaluate_exposure_data() check against the committed assam_osm.geojson.
+
+def _write_assam_terrain_rasters(data_dir):
+    """Create the five non-empty assam_pilot_* raster files the refresh checks for.
+    Placeholder bytes only -- the refresh checks existence + size, never opens them."""
+    raw = os.path.join(str(data_dir), "raw")
+    proc = os.path.join(str(data_dir), "processed")
+    os.makedirs(raw, exist_ok=True)
+    os.makedirs(proc, exist_ok=True)
+    with open(os.path.join(raw, "assam_pilot_dem.tif"), "wb") as fh:
+        fh.write(b"NOT-A-REAL-RASTER-PLACEHOLDER")
+    for name in ("slope", "aspect", "roughness", "tpi"):
+        with open(os.path.join(proc, "assam_pilot_%s.tif" % name), "wb") as fh:
+            fh.write(b"NOT-A-REAL-RASTER-PLACEHOLDER")
+
+
+def _stale_assam_record():
+    """A copy of the stale Assam record shape persisted in state_validation.json."""
+    return {
+        "id": "assam", "state_id": "assam", "state": "Assam", "state_name": "Assam",
+        "processing_status": "COMPLETED",
+        "validation_status": "DATA UNAVAILABLE",
+        "overall_status": "DATA UNAVAILABLE",
+        "rainfall_source": "Open-Meteo / Fallback Synthetic",
+        "rainfall_status": "Fallback Active (Open-Meteo / Local)",
+        "inventory_events": 401, "usable_events": 401,
+        "spatial_quality": "Moderate/Poor", "temporal_quality": "Good",
+        "dem_status": "Missing (Requires Download)",
+        "exposure_status": "Missing (Requires Download)",
+        "model_status": "Not Trained",
+        "validation_metrics": {}, "risk_result": None,
+        "blocking_reasons": ["Missing DEM Data", "Missing OSM Exposure Data"],
+        "error": None,
+    }
+
+
+def test_is_assam_record_matches_by_id_or_name():
+    assert sv._is_assam_record({"state_id": "assam"}) is True
+    assert sv._is_assam_record({"state_name": "Assam"}) is True
+    assert sv._is_assam_record({"id": "ASSAM"}) is True
+    assert sv._is_assam_record({"state": "  assam  "}) is True
+    assert sv._is_assam_record({"state_name": "Sikkim"}) is False
+    assert sv._is_assam_record("not a dict") is False
+
+
+def test_refresh_non_list_payload_returned_unchanged():
+    assert sv.refresh_assam_data_status({"not": "a list"}) == {"not": "a list"}
+    assert sv.refresh_assam_data_status(None) is None
+
+
+def test_refresh_leaves_non_assam_records_untouched(tmp_path):
+    import copy
+    sikkim = {"id": "sikkim", "state_name": "Sikkim", "overall_status": "VALIDATED_PILOT",
+              "dem_status": "Available", "model_status": "Trained & Validated"}
+    megh = {"id": "meghalaya", "state_name": "Meghalaya",
+            "overall_status": "DATA UNAVAILABLE",
+            "dem_status": "Missing (Requires Download)"}
+    records = [copy.deepcopy(sikkim), _stale_assam_record(), copy.deepcopy(megh)]
+    out = sv.refresh_assam_data_status(
+        records, evidence_dir=str(tmp_path / "none"), data_dir=str(tmp_path / "none"))
+    assert out[0] == sikkim          # non-Assam record returned byte-identical
+    assert out[2] == megh            # non-Assam record returned byte-identical
+    assert out[1]["state_name"] == "Assam"   # only the Assam record is refreshed
+
+
+def test_refresh_assam_upgrades_from_real_artifacts(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_assam_terrain_rasters(data_dir)
+    ev_dir = tmp_path / "models"
+    metrics = {"PR-AUC": 0.5878, "ROC-AUC": 0.7456, "F1": 0.566}  # fixture values
+    _write_evidence(ev_dir, "assam", metrics=metrics)
+
+    records = [_stale_assam_record()]
+    out = sv.refresh_assam_data_status(
+        records, evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Available"
+    assert rec["model_status"] == "Trained & Validated"
+    assert rec["validation_metrics"] == metrics          # flowed from the file
+    assert rec["overall_status"] == "VALIDATED_PILOT"
+    assert rec["validation_status"] == "VALIDATED_PILOT"
+
+    # Exposure agrees with the existing check against the committed assam_osm.geojson.
+    expected_exposure = sv.evaluate_exposure_data("Assam", NER_STATES_CONFIG["Assam"])
+    assert rec["exposure_status"] == expected_exposure
+
+    assert "Missing DEM Data" not in rec["blocking_reasons"]
+    assert not any("Persisted Validation Evidence" in b for b in rec["blocking_reasons"])
+    assert ("Missing OSM Exposure Data" in rec["blocking_reasons"]) == (
+        expected_exposure != "Available")
+
+    # The input record is copied, not mutated in place.
+    assert records[0]["dem_status"] == "Missing (Requires Download)"
+    assert records[0]["overall_status"] == "DATA UNAVAILABLE"
+
+
+def test_refresh_assam_incomplete_evidence_is_not_validated(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_assam_terrain_rasters(data_dir)
+    ev_dir = tmp_path / "empty_models"
+    os.makedirs(ev_dir, exist_ok=True)          # no assam_* evidence files
+
+    out = sv.refresh_assam_data_status(
+        [_stale_assam_record()], evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Available"
+    assert rec["model_status"].startswith("Validation Required")
+    assert rec["validation_metrics"] == {}
+    assert rec["risk_result"] is None
+    assert any("Persisted Validation Evidence" in b for b in rec["blocking_reasons"])
+
+    expected_exposure = sv.evaluate_exposure_data("Assam", NER_STATES_CONFIG["Assam"])
+    if expected_exposure == "Available":
+        assert rec["overall_status"] == "VALIDATION_REQUIRED"
+    else:
+        assert rec["overall_status"] == "DATA UNAVAILABLE"
+
+
+def test_refresh_assam_missing_terrain_is_reported(tmp_path):
+    data_dir = tmp_path / "data"
+    os.makedirs(data_dir, exist_ok=True)        # no assam_pilot_* rasters
+    ev_dir = tmp_path / "models"
+    _write_evidence(ev_dir, "assam", metrics={"PR-AUC": 0.5878, "ROC-AUC": 0.7456})
+
+    out = sv.refresh_assam_data_status(
+        [_stale_assam_record()], evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Missing (Requires Download)"
+    assert "Missing DEM Data" in rec["blocking_reasons"]
+    # Real persisted model evidence still earns "Trained & Validated" (evidence-
+    # gated, exactly like the Sikkim pilot contract) even though a live raster is
+    # currently absent -- the DEM chip / blocker report that independently.
+    assert rec["model_status"] == "Trained & Validated"
+    assert rec["overall_status"] == "VALIDATED_PILOT"

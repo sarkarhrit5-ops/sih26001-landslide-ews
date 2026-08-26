@@ -18,7 +18,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from app.models.ml_pipeline import dynamic_risk_module, explain_risk
-from app.services import pilot_events, risk_inputs, sikkim_prediction
+from app.services import assam_prediction, pilot_events, risk_inputs, sikkim_prediction
 from app.services.exposure import mock_get_osm_assets
 
 router = APIRouter()
@@ -199,7 +199,10 @@ def get_exposure_alerts():
 def get_validation_status():
     import json
     import os
-    from app.services.state_validation import reconcile_validation_report
+    from app.services.state_validation import (
+        reconcile_validation_report,
+        refresh_assam_data_status,
+    )
     file_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "processed", "state_validation.json")
     if os.path.exists(file_path):
         with open(file_path, "r") as f:
@@ -209,7 +212,17 @@ def get_validation_status():
         # model/metrics evidence is absent. Reconcile against on-disk evidence so
         # the API cannot present an unbacked claim as current truth. The file
         # itself is left unchanged (historical evidence is preserved).
-        return reconcile_validation_report(records)
+        #
+        # Then refresh the ASSAM record UP against the real Assam artifacts that
+        # now exist on disk (the assam_pilot_* terrain rasters, assam_osm.geojson,
+        # and the persisted assam_model.pkl + metrics + schema evidence). This
+        # file was written by an early NER sweep before any of those existed, and
+        # neither reconcile_validation_report (downgrade-only) nor
+        # determine_overall_status (model-evidence gate is pilot-only; Assam is
+        # is_pilot=False) will lift the stale "Missing" / "Not Trained" values.
+        # Assam-scoped and read-only: every other record is returned unchanged and
+        # the on-disk file is never rewritten. Fabricates nothing.
+        return refresh_assam_data_status(reconcile_validation_report(records))
     else:
         return []
 
@@ -289,6 +302,39 @@ def get_sikkim_evidence():
     }
 
 
+@router.get("/validation/assam/evidence")
+def get_assam_evidence():
+    """
+    Serve the persisted Assam model-evidence bundle, read-only.
+
+    Identical contract to /validation/sikkim/evidence: returns HTTP 200 with an
+    explicit `status` ("VALID" / "MISSING" / "INVALID") and reads every number from
+    the artifacts written by the Assam training run (assam_metrics.json /
+    assam_feature_schema.json / assam_provenance.json, resolved by
+    model_artifacts.verify_artifact_set(state_name="Assam")). It never computes,
+    defaults, or back-fills a value. The ONLY Assam-specific facts here are the
+    state label and pilot area; the field projections are shared with Sikkim.
+
+    The Assam pilot's single methodological difference from Sikkim -- land_cover_class
+    is REAL ESA WorldCover treated as a categorical feature, not an elevation proxy
+    -- is carried through faithfully in the returned feature_schema/provenance.
+    """
+    from app.services import model_artifacts
+    verdict = model_artifacts.verify_artifact_set(
+        state_name="Assam", require_full_metrics=False
+    )
+    return {
+        "state": "Assam",
+        "pilot_area": "Guwahati-Kamrup + western Karbi Anglong",
+        "status": verdict["status"],
+        "gate_compatible": verdict["gate_compatible"],
+        "problems": verdict["problems"],
+        "metrics": _pick(verdict.get("metrics"), _EVIDENCE_METRICS_FIELDS),
+        "feature_schema": _pick(verdict.get("feature_schema"), _EVIDENCE_SCHEMA_FIELDS),
+        "provenance": _pick(verdict.get("provenance"), _EVIDENCE_PROVENANCE_FIELDS),
+    }
+
+
 @router.get("/validation/sikkim/events")
 def get_sikkim_events():
     """
@@ -326,6 +372,61 @@ def get_sikkim_events():
     return {
         "state": "Sikkim",
         "pilot_area": "East Sikkim",
+        "aoi": aoi,
+        "count": len(events),
+        "source": (
+            "NASA Global Landslide Catalog (glc_legacy.csv), AOI-filtered; "
+            "de-duplicated on (latitude, longitude, event_date)." + served_from
+        ),
+        "source_artifact": source_artifact,
+        "spatial_uncertainty_summary": pilot_events.spatial_uncertainty_summary(
+            events, precise
+        ),
+        "events": events,
+    }
+
+
+@router.get("/validation/assam/events")
+def get_assam_events():
+    """
+    The real NASA GLC landslide positives inside the canonical Assam pilot AOI
+    (Guwahati-Kamrup + western Karbi Anglong) -- the exact inventory the Assam
+    pilot model was trained on.
+
+    Same delegation and refusal contract as /validation/sikkim/events, only the
+    pilot state differs: app.services.pilot_events serves the committed validated
+    snapshot (data/models/assam_events.json) when present and otherwise filters the
+    raw GLC catalog live with the identical AOI rule. Refuses with HTTP 503
+    DATA_UNAVAILABLE only when BOTH real sources are absent, rather than returning
+    an empty or synthesised list.
+    """
+    aoi, events, precise, source_artifact = pilot_events.resolve_pilot_events(
+        state_name="Assam"
+    )
+    if events is None:
+        raise HTTPException(
+            status_code=DATA_UNAVAILABLE_STATUS_CODE,
+            detail={
+                "status": "DATA_UNAVAILABLE",
+                "reason": (
+                    "No real Assam landslide inventory is available on the "
+                    "server: neither the committed events snapshot "
+                    "(data/models/assam_events.json) nor the raw NASA GLC "
+                    "catalog (data/raw/glc_legacy.csv) is present."
+                ),
+                "aoi": aoi,
+            },
+        )
+    if source_artifact == "validated_snapshot":
+        served_from = (
+            " Served from the committed validated snapshot "
+            "(data/models/assam_events.json)."
+        )
+    else:
+        served_from = " Served live from the raw catalog (data/raw/glc_legacy.csv)."
+    return {
+        "state": "Assam",
+        "pilot_area": "Guwahati-Kamrup + western Karbi Anglong",
         "aoi": aoi,
         "count": len(events),
         "source": (
@@ -381,6 +482,64 @@ def predict_sikkim_grid(date: Optional[str] = None,
             target_date, step_deg=step, run_type=run_type,
         )
     except sikkim_prediction.PredictionUnavailable as exc:
+        raise HTTPException(
+            status_code=DATA_UNAVAILABLE_STATUS_CODE,
+            detail={
+                "status": "DATA_UNAVAILABLE",
+                "reason": exc.reason,
+                "details": exc.details,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/predict/assam/grid")
+def predict_assam_grid(date: Optional[str] = None,
+                       step: float = assam_prediction.DEFAULT_STEP_DEG,
+                       run_type: str = "Early"):
+    """
+    Real per-grid-cell landslide susceptibility for the Assam pilot AOI
+    (Guwahati-Kamrup + western Karbi Anglong).
+
+    Identical contract to /predict/sikkim/grid -- runs the persisted 11-feature
+    LightGBM over a coarse grid tiling the AOI and returns, per cell, the model's RAW
+    susceptibility probability and the system warning class (NOT the Option-C fused
+    /risk/current score; see the response `disclosures`). Read-only; it fabricates
+    nothing and back-fills no cell.
+
+    The two Assam-specific differences from the Sikkim endpoint are that land cover is
+    REAL ESA WorldCover (not an elevation proxy) and is scored as a CATEGORICAL feature,
+    exactly as the Assam model was trained. A cell whose terrain OR WorldCover land
+    cover is missing/nodata/out-of-coverage comes back status UNAVAILABLE with no
+    probability -- never a substituted class or value.
+
+    Query params:
+      * date     -- optional prediction date 'YYYY-MM-DD' (default: today, UTC).
+                    Rainfall is the antecedent T-1..T-14 window, so `date` itself
+                    need not be in the catalog, only its preceding 14 days.
+      * step     -- grid cell size in degrees (default is a coarse grid; the range
+                    and a max cell count are enforced by the service).
+      * run_type -- IMERG run: Early (default), Late or Final.
+
+    Refuses with HTTP 503 DATA_UNAVAILABLE when the model artifacts or the real
+    rainfall cannot be obtained, and HTTP 400 for a bad `date` or `step`.
+    """
+    if date is None:
+        target_date = datetime.utcnow()
+    else:
+        try:
+            target_date = datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
+            )
+    try:
+        return assam_prediction.predict_assam_grid(
+            target_date, step_deg=step, run_type=run_type,
+        )
+    except assam_prediction.PredictionUnavailable as exc:
         raise HTTPException(
             status_code=DATA_UNAVAILABLE_STATUS_CODE,
             detail={

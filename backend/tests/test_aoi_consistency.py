@@ -21,6 +21,8 @@ import pytest
 
 from app.core import config_states
 from app.core.config_states import (
+    ARUNACHAL_PILOT_AOI,
+    ASSAM_PILOT_AOI,
     BBOX_KEYS,
     EAST_SIKKIM_PILOT_AOI,
     NER_STATES_CONFIG,
@@ -138,10 +140,71 @@ def test_unknown_state_raises_for_both_accessors():
 
 
 def test_state_without_a_pilot_aoi_raises():
-    """Assam is configured but is not a pilot, so it has no canonical pilot AOI."""
-    assert "Assam" in NER_STATES_CONFIG
+    """Manipur is configured but is not a pilot, so it has no canonical pilot AOI."""
+    assert "Manipur" in NER_STATES_CONFIG
+    assert "Manipur" not in PILOT_AOIS
     with pytest.raises(KeyError):
-        get_pilot_aoi("Assam")
+        get_pilot_aoi("Manipur")
+
+
+def test_assam_pilot_aoi_is_registered_and_points_at_the_canonical_object():
+    """Assam is the second pilot: it now has a canonical AOI registered."""
+    assert "Assam" in PILOT_AOIS
+    assert PILOT_AOIS["Assam"] is ASSAM_PILOT_AOI
+
+
+def test_assam_pilot_aoi_has_expected_bounds():
+    """
+    The Assam pilot AOI is pinned here (the single place these numbers are
+    asserted). It was chosen data-driven to cover the Guwahati/Kamrup cluster
+    plus the western Karbi Anglong hills; changing it changes the Assam
+    positives and the DEM/terrain rasters, so it must be a deliberate act.
+    """
+    assert get_pilot_aoi_bounds("Assam") == {
+        "min_lat": 25.6,
+        "max_lat": 26.6,
+        "min_lon": 91.3,
+        "max_lon": 93.7,
+    }
+
+
+def test_assam_pilot_aoi_is_contained_in_its_administrative_bbox():
+    report = check_pilot_aoi_consistency("Assam")
+    assert report["pilot_within_state"] is True
+    assert report["state_bbox"] == get_state_bbox("Assam")
+    assert report["pilot_aoi"] == get_pilot_aoi_bounds("Assam")
+    assert assert_pilot_aoi_consistency("Assam")["pilot_within_state"] is True
+
+
+def test_arunachal_pilot_aoi_is_registered_and_points_at_the_canonical_object():
+    """Arunachal Pradesh is the third pilot: it now has a canonical AOI registered."""
+    assert "Arunachal Pradesh" in PILOT_AOIS
+    assert PILOT_AOIS["Arunachal Pradesh"] is ARUNACHAL_PILOT_AOI
+
+
+def test_arunachal_pilot_aoi_has_expected_bounds():
+    """
+    The Arunachal pilot AOI is pinned here (the single place these numbers are
+    asserted). It was chosen data-driven to cover the central Subansiri/Siang
+    landslide cluster; changing it changes the Arunachal positives and the
+    DEM/terrain rasters, so it must be a deliberate act. Note max_lat is 27.99
+    (not 28.0) on purpose: an integer 28.0 floors to a third DEM tile row (see
+    the get_dem_tiles_for_bbox test below and the comment in config_states.py).
+    """
+    assert get_pilot_aoi_bounds("Arunachal Pradesh") == {
+        "min_lat": 26.5,
+        "max_lat": 27.99,
+        "min_lon": 92.0,
+        "max_lon": 94.5,
+    }
+
+
+def test_arunachal_pilot_aoi_is_contained_in_its_administrative_bbox():
+    report = check_pilot_aoi_consistency("Arunachal Pradesh")
+    assert report["pilot_within_state"] is True
+    assert report["state_bbox"] == get_state_bbox("Arunachal Pradesh")
+    assert report["pilot_aoi"] == get_pilot_aoi_bounds("Arunachal Pradesh")
+    assert assert_pilot_aoi_consistency("Arunachal Pradesh")["pilot_within_state"] is True
 
 
 def test_aoi_bounds_tuple_uses_rasterio_west_south_east_north_order():
@@ -306,3 +369,29 @@ def test_dem_tiles_derived_from_the_canonical_aoi():
 
     tiles = state_validation.get_dem_tiles_for_bbox(get_pilot_aoi_bounds("Sikkim"))
     assert tiles == [(27, 88), (28, 88)]
+
+
+def test_assam_dem_tiles_derived_from_the_canonical_aoi():
+    """
+    The Assam pilot AOI must resolve to exactly the six Copernicus GLO-30 tiles
+    its DEM/terrain prep downloads (scripts/prepare_assam_terrain.py). Skipped
+    offline when state_validation's import chain is unavailable.
+    """
+    state_validation = pytest.importorskip("app.services.state_validation")
+
+    tiles = state_validation.get_dem_tiles_for_bbox(get_pilot_aoi_bounds("Assam"))
+    assert tiles == [(25, 91), (25, 92), (25, 93), (26, 91), (26, 92), (26, 93)]
+
+
+def test_arunachal_dem_tiles_derived_from_the_canonical_aoi():
+    """
+    The Arunachal pilot AOI must resolve to exactly six Copernicus GLO-30 tiles.
+    This is the reason max_lat is 27.99 rather than 28.0: get_dem_tiles_for_bbox
+    floors max_lat, so 28.0 would floor to 28 and pull in a third tile row (N28*)
+    that lies outside the AOI, inflating the mosaic to nine tiles. Skipped offline
+    when state_validation's import chain is unavailable.
+    """
+    state_validation = pytest.importorskip("app.services.state_validation")
+
+    tiles = state_validation.get_dem_tiles_for_bbox(get_pilot_aoi_bounds("Arunachal Pradesh"))
+    assert tiles == [(26, 92), (26, 93), (26, 94), (27, 92), (27, 93), (27, 94)]

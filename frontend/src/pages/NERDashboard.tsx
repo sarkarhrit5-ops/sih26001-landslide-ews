@@ -161,15 +161,20 @@ function StateCard({ meta, report, selected, onSelect, onOpen }: StateCardProps)
         </div>
       )}
 
-      {isPilot && onOpen && (
+      {onOpen && (
         <button
           onClick={(e) => {
             e.stopPropagation();
             onOpen();
           }}
-          className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-[13px] font-semibold text-[#04120c] transition hover:bg-emerald-400"
+          className={cn(
+            'mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-semibold transition',
+            isPilot
+              ? 'bg-emerald-500 text-[#04120c] hover:bg-emerald-400'
+              : 'border border-slate-700 bg-slate-900/60 text-slate-200 hover:border-emerald-500/50 hover:text-emerald-300',
+          )}
         >
-          Open Sikkim console <ArrowRight className="h-4 w-4" />
+          Open {meta.name} console <ArrowRight className="h-4 w-4" />
         </button>
       )}
     </div>
@@ -179,9 +184,10 @@ function StateCard({ meta, report, selected, onSelect, onOpen }: StateCardProps)
 interface NERDashboardProps {
   onBack: () => void;
   onOpenSikkim: () => void;
+  onOpenAssam: () => void;
 }
 
-export function NERDashboard({ onBack, onOpenSikkim }: NERDashboardProps) {
+export function NERDashboard({ onBack, onOpenSikkim, onOpenAssam }: NERDashboardProps) {
   const [reports, setReports] = useState<StateValidationReport[]>([]);
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -342,7 +348,13 @@ export function NERDashboard({ onBack, onOpenSikkim }: NERDashboardProps) {
                     report={report}
                     selected={selectedId === meta.id}
                     onSelect={() => setSelectedId((cur) => (cur === meta.id ? null : meta.id))}
-                    onOpen={meta.isPilot ? onOpenSikkim : undefined}
+                    onOpen={
+                      meta.id === 'sikkim'
+                        ? onOpenSikkim
+                        : meta.id === 'assam'
+                          ? onOpenAssam
+                          : undefined
+                    }
                   />
                 ))}
               </div>

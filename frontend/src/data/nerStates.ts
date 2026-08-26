@@ -48,6 +48,19 @@ export const EAST_SIKKIM_PILOT_AOI: AdminBounds = {
   maxLon: 88.9,
 };
 
+/**
+ * Canonical Assam pilot AOI — mirrors config_states.ASSAM_PILOT_AOI exactly
+ * ("Assam pilot AOI (Guwahati-Kamrup + western Karbi Anglong)"). This is the
+ * single AOI the Assam pilot model was actually trained on; it is deliberately
+ * narrower than Assam's loose administrative bbox above.
+ */
+export const ASSAM_PILOT_AOI: AdminBounds = {
+  minLat: 25.6,
+  maxLat: 26.6,
+  minLon: 91.3,
+  maxLon: 93.7,
+};
+
 function centroid(b: AdminBounds): [number, number] {
   return [(b.minLat + b.maxLat) / 2, (b.minLon + b.maxLon) / 2];
 }

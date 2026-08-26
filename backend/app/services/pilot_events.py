@@ -52,6 +52,30 @@ DEFAULT_SNAPSHOT_PATH = os.path.join(_BACKEND_DIR, "data", "models", "sikkim_eve
 
 SNAPSHOT_SCHEMA_VERSION = "1.0.0"
 
+# Default pilot state. The resolver is state-parameterised so a second pilot
+# (Assam) can be served by the SAME code path with its own AOI + committed events
+# snapshot; the Sikkim defaults keep every existing call byte-for-byte unchanged.
+DEFAULT_STATE_NAME = "Sikkim"
+
+
+def _snapshot_path_for_state(state_name):
+    """
+    Committed events-snapshot path for a pilot state, under data/models/.
+
+    For the default Sikkim pilot this returns the module-level
+    DEFAULT_SNAPSHOT_PATH (read at call time) so existing callers and tests that
+    override that constant keep working unchanged; any other pilot state derives
+    '<state>_events.json' in the same directory (e.g. Assam -> assam_events.json).
+    The raw GLC catalog (DEFAULT_CSV_PATH) is a single shared file for all states;
+    only the AOI filter differs by state, so it is NOT state-derived here.
+    """
+    if (state_name or "").strip().lower() == DEFAULT_STATE_NAME.lower():
+        return DEFAULT_SNAPSHOT_PATH
+    return os.path.join(
+        _BACKEND_DIR, "data", "models",
+        "%s_events.json" % (state_name or "").strip().lower(),
+    )
+
 
 def _classify(accuracy):
     """(is_precise, spatial_uncertainty_label) for a raw location_accuracy string."""
@@ -64,18 +88,20 @@ def _within_aoi(aoi, lat, lon):
             and aoi["min_lon"] <= lon <= aoi["max_lon"])
 
 
-def load_events_from_csv(csv_path=None):
+def load_events_from_csv(csv_path=None, state_name=DEFAULT_STATE_NAME):
     """
     Reproduce the canonical pilot positives directly from the raw GLC catalog.
 
     Filter is identical to scripts/train_real_models.py: AOI bbox from
-    config_states.get_pilot_aoi_bounds -> drop rows with empty/nan event_date ->
-    de-duplicate on (latitude, longitude, event_date). Standard library only.
+    config_states.get_pilot_aoi_bounds(state_name) -> drop rows with empty/nan
+    event_date -> de-duplicate on (latitude, longitude, event_date). Standard
+    library only. The catalog file is shared across pilots; only the AOI (hence
+    which rows are kept) depends on `state_name`.
 
     Returns (aoi, events | None, precise_count). events is None only when the CSV
     file itself is absent; an empty CSV yields ([], 0), not None.
     """
-    aoi = get_pilot_aoi_bounds("Sikkim")
+    aoi = get_pilot_aoi_bounds(state_name)
     path = csv_path or DEFAULT_CSV_PATH
     if not os.path.exists(path):
         return aoi, None, 0
@@ -150,17 +176,19 @@ def _coerce_event(rec):
     return out
 
 
-def load_events_from_snapshot(json_path=None):
+def load_events_from_snapshot(json_path=None, state_name=DEFAULT_STATE_NAME):
     """
     Load the committed, validated events snapshot if present and well-formed.
 
     Returns (aoi, events | None, precise_count). events is None when the snapshot
     is absent or structurally invalid (so the caller can fall back to the CSV). The
-    AOI returned is always the live canonical AOI, never a value read from the file,
-    and any stored event outside that AOI is dropped rather than served.
+    AOI returned is always the live canonical AOI for `state_name`, never a value
+    read from the file, and any stored event outside that AOI is dropped rather
+    than served. The snapshot file defaults to the per-state path
+    (<state>_events.json); Sikkim keeps DEFAULT_SNAPSHOT_PATH.
     """
-    aoi = get_pilot_aoi_bounds("Sikkim")
-    path = json_path or DEFAULT_SNAPSHOT_PATH
+    aoi = get_pilot_aoi_bounds(state_name)
+    path = json_path or _snapshot_path_for_state(state_name)
     if not os.path.exists(path):
         return aoi, None, 0
     try:
@@ -188,19 +216,21 @@ def load_events_from_snapshot(json_path=None):
     return aoi, events, precise
 
 
-def resolve_pilot_events():
+def resolve_pilot_events(state_name=DEFAULT_STATE_NAME):
     """
     Resolve the pilot event geometry from the best available REAL source.
 
     Order: (1) committed validated snapshot, (2) raw GLC catalog. Returns
     (aoi, events | None, precise_count, source) where source is
     "validated_snapshot" | "raw_glc_catalog" | None. events is None only when BOTH
-    sources are absent, in which case the caller must refuse with HTTP 503.
+    sources are absent, in which case the caller must refuse with HTTP 503. The
+    `state_name` selects the AOI + snapshot file; it defaults to Sikkim so existing
+    callers are unaffected.
     """
-    aoi, events, precise = load_events_from_snapshot()
+    aoi, events, precise = load_events_from_snapshot(state_name=state_name)
     if events is not None:
         return aoi, events, precise, "validated_snapshot"
-    aoi, events, precise = load_events_from_csv()
+    aoi, events, precise = load_events_from_csv(state_name=state_name)
     if events is not None:
         return aoi, events, precise, "raw_glc_catalog"
     return aoi, None, 0, None

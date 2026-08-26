@@ -180,3 +180,95 @@ def test_build_snapshot_document_is_pure_projection():
     assert doc["spatial_uncertainty_summary"]["approximate_ge_5km"] == 1
     assert doc["spatial_uncertainty_summary"]["pct_approximate_ge_5km"] == 50.0
     assert doc["events"] is events
+
+
+# ---------------------------------------------------------------------------
+# State parameterisation (2nd pilot = Assam). The resolver is now state-aware so a
+# second pilot is served by the SAME code path with its own AOI + committed events
+# snapshot; every assertion below also pins that the Sikkim DEFAULT stays unchanged.
+# ---------------------------------------------------------------------------
+ASSAM_INSIDE = (26.0, 92.0)     # inside the Assam AOI, OUTSIDE the Sikkim AOI
+SIKKIM_INSIDE = (27.5, 88.5)    # inside the Sikkim AOI, OUTSIDE the Assam AOI
+
+
+def test_default_state_is_sikkim():
+    assert pilot_events.DEFAULT_STATE_NAME == "Sikkim"
+
+
+def test_snapshot_path_is_sikkim_default_but_derived_for_other_states(monkeypatch):
+    # Sikkim reads the module-level DEFAULT_SNAPSHOT_PATH *at call time* -- this is
+    # exactly what keeps monkeypatch-based tests and existing callers working, so
+    # overriding the constant must still be honoured for Sikkim.
+    monkeypatch.setattr(pilot_events, "DEFAULT_SNAPSHOT_PATH", "/sentinel/sikkim.json")
+    assert pilot_events._snapshot_path_for_state("Sikkim") == "/sentinel/sikkim.json"
+    assert pilot_events._snapshot_path_for_state("sikkim") == "/sentinel/sikkim.json"
+    assert pilot_events._snapshot_path_for_state("  SIKKIM  ") == "/sentinel/sikkim.json"
+
+    # Any OTHER pilot derives <data/models>/<state>_events.json and is UNAFFECTED by
+    # the Sikkim constant (case- and whitespace-insensitive).
+    assert pilot_events._snapshot_path_for_state("Assam").endswith(
+        os.path.join("data", "models", "assam_events.json")
+    )
+    assert pilot_events._snapshot_path_for_state("  Assam ").endswith(
+        os.path.join("data", "models", "assam_events.json")
+    )
+
+
+def test_snapshot_loader_uses_state_selected_aoi(tmp_path):
+    """The same snapshot file is filtered to whichever pilot AOI the state selects."""
+    snap = tmp_path / "snap.json"
+    _write(str(snap), json.dumps({"events": [
+        {"latitude": ASSAM_INSIDE[0], "longitude": ASSAM_INSIDE[1],
+         "event_date": "01/01/2020", "location_accuracy": "1km"},
+        {"latitude": SIKKIM_INSIDE[0], "longitude": SIKKIM_INSIDE[1],
+         "event_date": "01/01/2020", "location_accuracy": "1km"},
+    ]}))
+
+    aoi_a, events_a, _ = pilot_events.load_events_from_snapshot(
+        json_path=str(snap), state_name="Assam")
+    assert aoi_a == pilot_events.get_pilot_aoi_bounds("Assam")
+    assert [(e["latitude"], e["longitude"]) for e in events_a] == [ASSAM_INSIDE]
+
+    aoi_s, events_s, _ = pilot_events.load_events_from_snapshot(
+        json_path=str(snap), state_name="Sikkim")
+    assert aoi_s == pilot_events.get_pilot_aoi_bounds("Sikkim")
+    assert [(e["latitude"], e["longitude"]) for e in events_s] == [SIKKIM_INSIDE]
+
+    # Default (no state_name) MUST remain Sikkim.
+    _, events_default, _ = pilot_events.load_events_from_snapshot(json_path=str(snap))
+    assert [(e["latitude"], e["longitude"]) for e in events_default] == [SIKKIM_INSIDE]
+
+
+def test_csv_loader_shares_file_but_filters_by_state_aoi(tmp_path):
+    """The raw catalog is one shared file; only the AOI (hence kept rows) is per-state."""
+    csv_file = tmp_path / "glc.csv"
+    _write(str(csv_file),
+           "latitude,longitude,event_date,location_accuracy\r\n"
+           "%s,%s,01/01/2020 12:00:00 AM,1km\r\n"
+           "%s,%s,01/01/2020 12:00:00 AM,1km\r\n"
+           % (ASSAM_INSIDE[0], ASSAM_INSIDE[1], SIKKIM_INSIDE[0], SIKKIM_INSIDE[1]))
+
+    aoi_a, events_a, _ = pilot_events.load_events_from_csv(
+        csv_path=str(csv_file), state_name="Assam")
+    assert aoi_a == pilot_events.get_pilot_aoi_bounds("Assam")
+    assert [(e["latitude"], e["longitude"]) for e in events_a] == [ASSAM_INSIDE]
+
+    _, events_s, _ = pilot_events.load_events_from_csv(
+        csv_path=str(csv_file), state_name="Sikkim")
+    assert [(e["latitude"], e["longitude"]) for e in events_s] == [SIKKIM_INSIDE]
+
+
+def test_resolve_assam_from_committed_snapshot_offline():
+    """resolve_pilot_events('Assam') serves the committed Assam snapshot, AOI-filtered."""
+    path = pilot_events._snapshot_path_for_state("Assam")
+    if not os.path.exists(path):
+        pytest.skip("committed assam_events.json not present in this checkout")
+    aoi, events, precise, source = pilot_events.resolve_pilot_events(state_name="Assam")
+    assert source == "validated_snapshot"
+    assert events and len(events) >= 1
+    assert aoi == pilot_events.get_pilot_aoi_bounds("Assam")
+    for ev in events:
+        assert pilot_events._within_aoi(aoi, ev["latitude"], ev["longitude"])
+        assert _REQUIRED_KEYS.issubset(ev.keys())
+        _, expected_label = pilot_events._classify(ev["location_accuracy"])
+        assert ev["spatial_uncertainty"] == expected_label

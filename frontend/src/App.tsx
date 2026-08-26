@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { WelcomePage } from './pages/WelcomePage';
 import { NERDashboard } from './pages/NERDashboard';
 import { SikkimDashboard } from './pages/SikkimDashboard';
+import { AssamDashboard } from './pages/AssamDashboard';
 
-export type ActivePage = 'welcome' | 'ner' | 'sikkim';
+export type ActivePage = 'welcome' | 'ner' | 'sikkim' | 'assam';
 
 export function App() {
   const [page, setPage] = useState<ActivePage>('welcome');
@@ -22,9 +23,14 @@ export function App() {
         />
       )}
       {page === 'ner' && (
-        <NERDashboard onBack={() => setPage('welcome')} onOpenSikkim={() => setPage('sikkim')} />
+        <NERDashboard
+          onBack={() => setPage('welcome')}
+          onOpenSikkim={() => setPage('sikkim')}
+          onOpenAssam={() => setPage('assam')}
+        />
       )}
       {page === 'sikkim' && <SikkimDashboard onBack={() => setPage('ner')} />}
+      {page === 'assam' && <AssamDashboard onBack={() => setPage('ner')} />}
     </div>
   );
 }

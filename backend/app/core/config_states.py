@@ -125,11 +125,86 @@ NER_STATES_CONFIG = {
     }
 }
 
+# ---------------------------------------------------------------------------
+# ASSAM PILOT AOI -- second pilot, added to replicate the Sikkim data pipeline
+# ---------------------------------------------------------------------------
+# Unlike Sikkim (a small, jurisdiction-clean mountain state), Assam's
+# administrative box is a loose ~4-by-6.5 degree over-approximation dominated by
+# the flat Brahmaputra floodplain, and it overlaps six neighbouring states plus
+# parts of Bhutan, Bangladesh and Myanmar. A whole-state 30 m DEM is neither
+# feasible on the 8 GB target nor meaningful (most of it is not landslide
+# terrain). This AOI was therefore chosen DATA-DRIVEN from the real NASA GLC
+# catalog: it covers the dominant Guwahati / Kamrup landslide cluster and the
+# western Karbi Anglong hills.
+#
+# Real GLC positives inside this box (de-duplicated on lat/lon/date): 59 total,
+# of which 38 carry admin_division_name == "Assam"; the remainder are genuine
+# landslides inside the box attributed to neighbouring jurisdictions. Positives
+# are kept on the SAME pure-bbox rule used by the Sikkim pilot, and the
+# jurisdiction breakdown is recorded in the events snapshot
+# (backend/data/models/assam_events.json) rather than silently dropped. The DEM
+# extent is 6 Copernicus GLO-30 tiles.
+#
+# Exactly like EAST_SIKKIM_PILOT_AOI, editing these numbers changes which
+# positives the Assam pilot would train on and the DEM / terrain rasters it
+# derives, so change them only as a deliberate, reviewed act. The AOI is required
+# to sit inside Assam's administrative box; assert_pilot_aoi_consistency("Assam")
+# enforces that.
+ASSAM_PILOT_AOI = {
+    "name": "Assam pilot AOI (Guwahati-Kamrup + western Karbi Anglong)",
+    "min_lat": 25.6,
+    "max_lat": 26.6,
+    "min_lon": 91.3,
+    "max_lon": 93.7
+}
+
+# ---------------------------------------------------------------------------
+# ARUNACHAL PRADESH PILOT AOI -- third pilot, same data pipeline as Assam
+# ---------------------------------------------------------------------------
+# Arunachal's administrative box (26.5/29.5 lat, 91.5/97.5 lon) is the largest in
+# the NER sweep -- a ~3-by-6 degree over-approximation of rugged Eastern Himalaya
+# that also overlaps Assam, Nagaland and the Tibet Autonomous Region. A whole-state
+# 30 m DEM is infeasible on the 8 GB target and mostly not the terrain of interest.
+# This AOI was therefore chosen DATA-DRIVEN from the real NASA GLC catalog: it
+# covers the dominant central-Arunachal landslide cluster (the Subansiri / Siang
+# belt around 27.0-27.5 N, 93.5-94.0 E) plus its western/central surroundings.
+#
+# Real GLC positives inside this box (de-duplicated on lat/lon/date): 50, spanning
+# 40 independent event-dates. As with Sikkim (37) and Assam (37), this is well
+# below the >=100 independent dates the Option-A gate needs -- even the ENTIRE
+# administrative box yields only 76 -- so the Arunachal pilot is Option-C by
+# construction, and the AOI was sized to balance training positives against the
+# 8 GB DEM/terrain budget (6 Copernicus GLO-30 tiles, ~1.56x the Assam raster).
+# Positives are kept on the SAME pure-bbox rule as the other pilots; the mixed
+# jurisdiction breakdown is recorded in the events snapshot
+# (backend/data/models/arunachal_pradesh_events.json), never silently dropped.
+#
+# Exactly like the other pilot AOIs, editing these numbers changes which positives
+# the pilot trains on and the DEM / terrain rasters it derives. The AOI is required
+# to sit inside Arunachal's administrative box;
+# assert_pilot_aoi_consistency("Arunachal Pradesh") enforces that.
+# NOTE ON max_lat = 27.99 (not 28.0): get_dem_tiles_for_bbox() selects tiles by
+# floor(min_lat)..floor(max_lat) inclusive, so an integer max_lat of 28.0 would
+# floor to 28 and pull in a whole third tile row (N28*, covering 28-29 N lying
+# outside the AOI) -- 9 GLO-30 tiles instead of 6. Capping at 27.99 keeps the tile
+# set at the intended 6 (rows N26/N27) with no loss of DEM coverage (the N27 tile
+# spans up to 28.0 N) and no loss of positives (the two northern-most events sit at
+# 27.98 N, still inside).
+ARUNACHAL_PILOT_AOI = {
+    "name": "Arunachal Pradesh pilot AOI (central Subansiri-Siang belt)",
+    "min_lat": 26.5,
+    "max_lat": 27.99,
+    "min_lon": 92.0,
+    "max_lon": 94.5
+}
+
 # Canonical pilot AOI per state. Kept OUTSIDE NER_STATES_CONFIG on purpose so the
 # shape of the state config dictionaries (which are iterated and partially
 # serialised by the validation sweep) is unchanged.
 PILOT_AOIS = {
-    "Sikkim": EAST_SIKKIM_PILOT_AOI
+    "Sikkim": EAST_SIKKIM_PILOT_AOI,
+    "Assam": ASSAM_PILOT_AOI,
+    "Arunachal Pradesh": ARUNACHAL_PILOT_AOI
 }
 
 
