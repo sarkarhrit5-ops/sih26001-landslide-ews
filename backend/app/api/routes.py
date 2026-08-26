@@ -18,7 +18,13 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from app.models.ml_pipeline import dynamic_risk_module, explain_risk
-from app.services import assam_prediction, pilot_events, risk_inputs, sikkim_prediction
+from app.services import (
+    arunachal_prediction,
+    assam_prediction,
+    pilot_events,
+    risk_inputs,
+    sikkim_prediction,
+)
 from app.services.exposure import mock_get_osm_assets
 
 router = APIRouter()
@@ -335,6 +341,41 @@ def get_assam_evidence():
     }
 
 
+@router.get("/validation/arunachal/evidence")
+def get_arunachal_evidence():
+    """
+    Serve the persisted Arunachal Pradesh model-evidence bundle, read-only.
+
+    Identical contract to /validation/sikkim/evidence and /validation/assam/evidence:
+    returns HTTP 200 with an explicit `status` ("VALID" / "MISSING" / "INVALID") and
+    reads every number from the artifacts written by the Arunachal training run
+    (arunachal_pradesh_metrics.json / arunachal_pradesh_feature_schema.json /
+    arunachal_pradesh_provenance.json, resolved by
+    model_artifacts.verify_artifact_set(state_name="Arunachal Pradesh")). It never
+    computes, defaults, or back-fills a value. The ONLY Arunachal-specific facts here
+    are the state label and pilot area; the field projections are shared with Sikkim.
+
+    Like the Assam pilot, Arunachal's single methodological difference from Sikkim --
+    land_cover_class is REAL ESA WorldCover treated as a categorical feature, not an
+    elevation proxy -- is carried through faithfully in the returned
+    feature_schema/provenance.
+    """
+    from app.services import model_artifacts
+    verdict = model_artifacts.verify_artifact_set(
+        state_name="Arunachal Pradesh", require_full_metrics=False
+    )
+    return {
+        "state": "Arunachal Pradesh",
+        "pilot_area": "central Subansiri-Siang belt",
+        "status": verdict["status"],
+        "gate_compatible": verdict["gate_compatible"],
+        "problems": verdict["problems"],
+        "metrics": _pick(verdict.get("metrics"), _EVIDENCE_METRICS_FIELDS),
+        "feature_schema": _pick(verdict.get("feature_schema"), _EVIDENCE_SCHEMA_FIELDS),
+        "provenance": _pick(verdict.get("provenance"), _EVIDENCE_PROVENANCE_FIELDS),
+    }
+
+
 @router.get("/validation/sikkim/events")
 def get_sikkim_events():
     """
@@ -427,6 +468,83 @@ def get_assam_events():
     return {
         "state": "Assam",
         "pilot_area": "Guwahati-Kamrup + western Karbi Anglong",
+        "aoi": aoi,
+        "count": len(events),
+        "source": (
+            "NASA Global Landslide Catalog (glc_legacy.csv), AOI-filtered; "
+            "de-duplicated on (latitude, longitude, event_date)." + served_from
+        ),
+        "source_artifact": source_artifact,
+        "spatial_uncertainty_summary": pilot_events.spatial_uncertainty_summary(
+            events, precise
+        ),
+        "events": events,
+    }
+
+
+@router.get("/validation/arunachal/events")
+def get_arunachal_events():
+    """
+    The real NASA GLC landslide positives inside the canonical Arunachal Pradesh
+    pilot AOI (central Subansiri-Siang belt) -- the exact inventory the Arunachal
+    pilot model was trained on.
+
+    Same real-source-or-refuse contract as /validation/sikkim/events and
+    /validation/assam/events: the committed validated snapshot
+    (data/models/arunachal_pradesh_events.json) is served when present, otherwise the
+    raw GLC catalog is filtered live with the identical AOI rule. Refuses with HTTP
+    503 DATA_UNAVAILABLE only when BOTH real sources are absent, never returning an
+    empty or synthesised list.
+
+    NOTE: unlike the Sikkim/Assam routes, this composes the pilot_events loaders
+    directly instead of calling resolve_pilot_events(). pilot_events derives the
+    per-state snapshot filename by lower-casing the state name, which for the
+    two-word "Arunachal Pradesh" yields the SPACE form "arunachal pradesh_events.json"
+    -- but the committed artifact uses the canonical UNDERSCORE form
+    "arunachal_pradesh_events.json". Passing json_path explicitly resolves the
+    snapshot correctly WITHOUT modifying the shared pilot_events module, while
+    preserving resolve_pilot_events()'s exact snapshot-first / raw-CSV-fallback order
+    and semantics (the AOI is still the live canonical one for "Arunachal Pradesh").
+    """
+    import os
+    snapshot_path = os.path.join(
+        os.path.dirname(pilot_events.DEFAULT_SNAPSHOT_PATH),
+        "arunachal_pradesh_events.json",
+    )
+    aoi, events, precise = pilot_events.load_events_from_snapshot(
+        json_path=snapshot_path, state_name="Arunachal Pradesh"
+    )
+    if events is not None:
+        source_artifact = "validated_snapshot"
+    else:
+        aoi, events, precise = pilot_events.load_events_from_csv(
+            state_name="Arunachal Pradesh"
+        )
+        source_artifact = "raw_glc_catalog" if events is not None else None
+    if events is None:
+        raise HTTPException(
+            status_code=DATA_UNAVAILABLE_STATUS_CODE,
+            detail={
+                "status": "DATA_UNAVAILABLE",
+                "reason": (
+                    "No real Arunachal Pradesh landslide inventory is available on "
+                    "the server: neither the committed events snapshot "
+                    "(data/models/arunachal_pradesh_events.json) nor the raw NASA GLC "
+                    "catalog (data/raw/glc_legacy.csv) is present."
+                ),
+                "aoi": aoi,
+            },
+        )
+    if source_artifact == "validated_snapshot":
+        served_from = (
+            " Served from the committed validated snapshot "
+            "(data/models/arunachal_pradesh_events.json)."
+        )
+    else:
+        served_from = " Served live from the raw catalog (data/raw/glc_legacy.csv)."
+    return {
+        "state": "Arunachal Pradesh",
+        "pilot_area": "central Subansiri-Siang belt",
         "aoi": aoi,
         "count": len(events),
         "source": (
@@ -540,6 +658,65 @@ def predict_assam_grid(date: Optional[str] = None,
             target_date, step_deg=step, run_type=run_type,
         )
     except assam_prediction.PredictionUnavailable as exc:
+        raise HTTPException(
+            status_code=DATA_UNAVAILABLE_STATUS_CODE,
+            detail={
+                "status": "DATA_UNAVAILABLE",
+                "reason": exc.reason,
+                "details": exc.details,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/predict/arunachal/grid")
+def predict_arunachal_grid(date: Optional[str] = None,
+                           step: float = arunachal_prediction.DEFAULT_STEP_DEG,
+                           run_type: str = "Early"):
+    """
+    Real per-grid-cell landslide susceptibility for the Arunachal Pradesh pilot AOI
+    (central Subansiri-Siang belt).
+
+    Identical contract to /predict/sikkim/grid and /predict/assam/grid -- runs the
+    persisted 11-feature LightGBM over a coarse grid tiling the AOI and returns, per
+    cell, the model's RAW susceptibility probability and the system warning class (NOT
+    the Option-C fused /risk/current score; see the response `disclosures`). Read-only;
+    it fabricates nothing and back-fills no cell.
+
+    Exactly like the Assam endpoint, the two Arunachal-specific differences from the
+    Sikkim endpoint are that land cover is REAL ESA WorldCover (not an elevation
+    proxy) and is scored as a CATEGORICAL feature, precisely as the Arunachal model
+    was trained. A cell whose terrain OR WorldCover land cover is missing / nodata /
+    out-of-coverage comes back status UNAVAILABLE with no probability -- never a
+    substituted class or value.
+
+    Query params:
+      * date     -- optional prediction date 'YYYY-MM-DD' (default: today, UTC).
+                    Rainfall is the antecedent T-1..T-14 window, so `date` itself
+                    need not be in the catalog, only its preceding 14 days.
+      * step     -- grid cell size in degrees (default is a coarse grid; the range
+                    and a max cell count are enforced by the service).
+      * run_type -- IMERG run: Early (default), Late or Final.
+
+    Refuses with HTTP 503 DATA_UNAVAILABLE when the model artifacts or the real
+    rainfall cannot be obtained, and HTTP 400 for a bad `date` or `step`.
+    """
+    if date is None:
+        target_date = datetime.utcnow()
+    else:
+        try:
+            target_date = datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
+            )
+    try:
+        return arunachal_prediction.predict_arunachal_grid(
+            target_date, step_deg=step, run_type=run_type,
+        )
+    except arunachal_prediction.PredictionUnavailable as exc:
         raise HTTPException(
             status_code=DATA_UNAVAILABLE_STATUS_CODE,
             detail={

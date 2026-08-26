@@ -61,6 +61,19 @@ export const ASSAM_PILOT_AOI: AdminBounds = {
   maxLon: 93.7,
 };
 
+/**
+ * Canonical Arunachal Pradesh pilot AOI — mirrors config_states.ARUNACHAL_PILOT_AOI
+ * exactly ("Arunachal Pradesh pilot AOI (central Subansiri-Siang belt)"). This is the
+ * single AOI the Arunachal pilot model was actually trained on; it is deliberately
+ * narrower than Arunachal's loose administrative bbox above.
+ */
+export const ARUNACHAL_PILOT_AOI: AdminBounds = {
+  minLat: 26.5,
+  maxLat: 27.99,
+  minLon: 92.0,
+  maxLon: 94.5,
+};
+
 function centroid(b: AdminBounds): [number, number] {
   return [(b.minLat + b.maxLat) / 2, (b.minLon + b.maxLon) / 2];
 }

@@ -3,8 +3,9 @@ import { WelcomePage } from './pages/WelcomePage';
 import { NERDashboard } from './pages/NERDashboard';
 import { SikkimDashboard } from './pages/SikkimDashboard';
 import { AssamDashboard } from './pages/AssamDashboard';
+import { ArunachalDashboard } from './pages/ArunachalDashboard';
 
-export type ActivePage = 'welcome' | 'ner' | 'sikkim' | 'assam';
+export type ActivePage = 'welcome' | 'ner' | 'sikkim' | 'assam' | 'arunachal';
 
 export function App() {
   const [page, setPage] = useState<ActivePage>('welcome');
@@ -27,10 +28,12 @@ export function App() {
           onBack={() => setPage('welcome')}
           onOpenSikkim={() => setPage('sikkim')}
           onOpenAssam={() => setPage('assam')}
+          onOpenArunachal={() => setPage('arunachal')}
         />
       )}
       {page === 'sikkim' && <SikkimDashboard onBack={() => setPage('ner')} />}
       {page === 'assam' && <AssamDashboard onBack={() => setPage('ner')} />}
+      {page === 'arunachal' && <ArunachalDashboard onBack={() => setPage('ner')} />}
     </div>
   );
 }

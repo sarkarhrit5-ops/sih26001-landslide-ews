@@ -185,9 +185,10 @@ interface NERDashboardProps {
   onBack: () => void;
   onOpenSikkim: () => void;
   onOpenAssam: () => void;
+  onOpenArunachal: () => void;
 }
 
-export function NERDashboard({ onBack, onOpenSikkim, onOpenAssam }: NERDashboardProps) {
+export function NERDashboard({ onBack, onOpenSikkim, onOpenAssam, onOpenArunachal }: NERDashboardProps) {
   const [reports, setReports] = useState<StateValidationReport[]>([]);
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -353,7 +354,9 @@ export function NERDashboard({ onBack, onOpenSikkim, onOpenAssam }: NERDashboard
                         ? onOpenSikkim
                         : meta.id === 'assam'
                           ? onOpenAssam
-                          : undefined
+                          : meta.id === 'arunachal_pradesh'
+                            ? onOpenArunachal
+                            : undefined
                     }
                   />
                 ))}
