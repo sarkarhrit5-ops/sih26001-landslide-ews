@@ -355,6 +355,26 @@ export type ArunachalEventsResponse = SikkimEventsResponse;
 export type ArunachalPredictionResponse = SikkimPredictionResponse;
 export type ArunachalPredictionCell = SikkimPredictionCell;
 
+/**
+ * Meghalaya pilot response contracts.
+ *
+ * The three Meghalaya endpoints (/validation/meghalaya/evidence,
+ * /validation/meghalaya/events, /predict/meghalaya/grid) return byte-for-byte the SAME
+ * JSON shapes as their Sikkim counterparts — the backend shares the identical field
+ * projections (_pick) and the same prediction builder — so the Meghalaya console reuses
+ * these types via aliases rather than duplicating the definitions. As with Assam and
+ * Arunachal, the differences are in the *values*, not the schema: Meghalaya's pilot_area
+ * label differs ("East Khasi + Jaintia Hills belt"), and land_cover_class is carried as
+ * REAL ESA WorldCover (a categorical feature) rather than the Sikkim elevation-derived
+ * proxy — the same methodological treatment as the Assam and Arunachal pilots. Those
+ * honest distinctions are surfaced by the Meghalaya console from the live feature_schema
+ * / provenance / disclosures fields.
+ */
+export type MeghalayaEvidenceResponse = SikkimEvidenceResponse;
+export type MeghalayaEventsResponse = SikkimEventsResponse;
+export type MeghalayaPredictionResponse = SikkimPredictionResponse;
+export type MeghalayaPredictionCell = SikkimPredictionCell;
+
 class ApiService {
   private async fetchJson<T>(endpoint: string): Promise<T> {
     try {
@@ -515,6 +535,49 @@ class ApiService {
     const query = params.toString();
     return this.fetchJson<ArunachalPredictionResponse>(
       `/api/v1/predict/arunachal/grid${query ? `?${query}` : ''}`,
+    );
+  }
+
+  /**
+   * Persisted Meghalaya model-evidence bundle (metrics + feature schema + provenance).
+   * Same contract as getSikkimEvidence — returns an explicit status
+   * (VALID/MISSING/INVALID), reads every number from the persisted Meghalaya artifacts,
+   * and never fabricates. As with Assam and Arunachal, the pilot-specific truth
+   * (land_cover_class is REAL ESA WorldCover, not an elevation proxy) is carried
+   * faithfully in feature_schema / provenance.
+   */
+  async getMeghalayaEvidence(): Promise<MeghalayaEvidenceResponse> {
+    return this.fetchJson<MeghalayaEvidenceResponse>('/api/v1/validation/meghalaya/evidence');
+  }
+
+  /**
+   * Real NASA GLC landslide positives inside the canonical Meghalaya pilot AOI
+   * (East Khasi + Jaintia Hills belt). Throws if the backend refuses
+   * (HTTP 503 DATA_UNAVAILABLE) rather than returning a synthesised list.
+   */
+  async getMeghalayaEvents(): Promise<MeghalayaEventsResponse> {
+    return this.fetchJson<MeghalayaEventsResponse>('/api/v1/validation/meghalaya/events');
+  }
+
+  /**
+   * Real per-grid-cell landslide susceptibility for the Meghalaya pilot AOI, produced by
+   * running the persisted 11-feature Meghalaya LightGBM over a coarse grid with real ESA
+   * WorldCover land cover (categorical) and real IMERG antecedent rainfall. This is the
+   * model's RAW probability, not the Option-C fused score (see response.disclosures,
+   * which also record the ERA5-trained → IMERG-served rainfall shift). Throws if the
+   * backend refuses (HTTP 503 DATA_UNAVAILABLE) rather than returning fabricated risk
+   * zones.
+   *
+   * @param date optional 'YYYY-MM-DD' prediction date (default: backend uses today, UTC)
+   * @param step optional grid cell size in degrees (default: backend coarse grid)
+   */
+  async getMeghalayaPrediction(date?: string, step?: number): Promise<MeghalayaPredictionResponse> {
+    const params = new URLSearchParams();
+    if (date) params.set('date', date);
+    if (step != null) params.set('step', String(step));
+    const query = params.toString();
+    return this.fetchJson<MeghalayaPredictionResponse>(
+      `/api/v1/predict/meghalaya/grid${query ? `?${query}` : ''}`,
     );
   }
 }

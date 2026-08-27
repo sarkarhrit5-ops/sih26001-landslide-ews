@@ -1,0 +1,124 @@
+{
+  "provenance_schema_version": "1.0.0",
+  "state": "Meghalaya",
+  "pilot_area": "East Khasi + Jaintia Hills belt",
+  "aoi": {
+    "min_lat": 25.0,
+    "max_lat": 25.99,
+    "min_lon": 91.0,
+    "max_lon": 92.8
+  },
+  "glc_source": "NASA Global Landslide Catalog Export (meghalaya_events.json snapshot), AOI-filtered",
+  "glc_event_count": 34,
+  "sample_counts": {
+    "positive_events": 34,
+    "deduplicated_positive_events": 34,
+    "negative_samples": 102,
+    "total_samples": 136,
+    "independent_event_dates": 29,
+    "pct_events_low_location_accuracy": 76.4706
+  },
+  "rainfall_source": "Open-Meteo ERA5 archive API (daily precipitation_sum), antecedent window strictly T-14..T-1; no zero-fill or synthetic substitution",
+  "dem_source": "Copernicus GLO-30 DEM (30 m), Meghalaya pilot tiles, merged and clipped to the canonical pilot AOI",
+  "terrain_derivative_method": "app.services.terrain_processing.process_dem_in_chunks (slope, aspect, roughness, tpi; chunked at 512 px)",
+  "exposure_source": "NOT USED as a model feature in this run",
+  "model_type": "LightGBM (lightgbm.LGBMClassifier)",
+  "model_hyperparameters": {
+    "n_estimators": 100,
+    "random_state": 42,
+    "n_jobs": 2,
+    "verbose": -1
+  },
+  "model_serialization": "joblib",
+  "feature_list": [
+    "elevation",
+    "slope",
+    "aspect",
+    "roughness",
+    "tpi",
+    "land_cover_class",
+    "rain_1d",
+    "rain_3d",
+    "rain_7d",
+    "antecedent_rain_14d",
+    "rain_intensity_max_3d"
+  ],
+  "spatial_split": "Latitude median split",
+  "temporal_split": "Event year split (train <= 2014, test >= 2015)",
+  "negative_sampling": "Spatially buffered random points, >= 0.05 deg (~5 km) from any positive, 3:1 ratio, seed 42",
+  "leakage_controls": {
+    "spatial_leakage": "MITIGATED: Spatially buffered negative sampling (>= 0.05 deg / ~5km) + latitude-median spatial holdout split.",
+    "temporal_leakage": "MITIGATED: Strict temporal holdout (Train <= 2014 vs Test >= 2015).",
+    "future_rainfall_leakage": "MITIGATED: Antecedent rainfall strictly from past days (T-14..T-1) before event date T; no future rainfall used.",
+    "duplicate_overlapping_events": "MITIGATED: 0 duplicate (lat,lon,event_date) positives in the committed AOI-filtered snapshot (positives=34, unique=34)."
+  },
+  "random_seed": 42,
+  "dataset_artifact": "D:\\landslide\\sih26001-landslide-ews\\backend\\data\\processed\\meghalaya_pilot_training_matrix.parquet",
+  "code_version": "50c0e802da786eb7f4b31a7333d70fa5f4fa0767",
+  "software_versions": {
+    "python": "3.14.2",
+    "numpy": "2.5.2",
+    "pandas": "3.0.5",
+    "sklearn": "1.9.0",
+    "lightgbm": "4.7.0",
+    "joblib": "1.5.3",
+    "rasterio": "1.5.1",
+    "pyarrow": "25.0.1",
+    "requests": "2.34.2"
+  },
+  "input_status": {
+    "dem_copernicus_glo30": "REAL",
+    "terrain_derivatives": "REAL",
+    "landslide_inventory_glc": "REAL",
+    "antecedent_rainfall_open_meteo_era5": "REAL",
+    "land_cover_class": "REAL",
+    "imerg_satellite_rainfall": "NOT_USED",
+    "osm_exposure": "NOT_USED"
+  },
+  "generation_timestamp": "2026-08-27T13:24:22Z",
+  "additional_context": {
+    "land_cover_treatment": "land_cover_class is a REAL ESA WorldCover v200 (2021) nominal grouping and is fed to the LightGBM primary model as a pandas categorical (categorical_feature=['land_cover_class']). This is the ONLY methodological difference from the Sikkim pilot, whose land_cover_class is an ordered elevation proxy left numeric. It matches the Assam and Arunachal pilots' treatment exactly.",
+    "baseline_encoding_note": "Logistic Regression and Random Forest comparison rows use the numeric land_cover_class encoding exactly as Sikkim does; only the persisted LightGBM primary model uses the categorical view.",
+    "landcover_group_labels": {
+      "1": "forest (tree cover)",
+      "2": "shrub / grass / herbaceous",
+      "3": "cropland",
+      "4": "built-up",
+      "5": "bare / sparse / snow",
+      "6": "water / wetland"
+    },
+    "rows_dropped_for_missing_features": {
+      "rows_in": 136,
+      "rows_dropped": 0,
+      "rows_out": 136,
+      "dropped_nonfinite_numeric": 0,
+      "dropped_landcover_unavailable": 0,
+      "fill_or_impute_performed": false
+    },
+    "duplicate_positive_events": 0,
+    "imerg_note": "IMERG (weather_ingestion.py) was NOT used to build any training feature. Antecedent rainfall comes from the Open-Meteo ERA5 archive, exactly as in Sikkim/Assam/Arunachal training.",
+    "matrix_schema_reference": "D:\\landslide\\sih26001-landslide-ews\\backend\\data\\models\\meghalaya_pilot_training_matrix_schema.json",
+    "aoi_source": "app.core.config_states.MEGHALAYA_PILOT_AOI -- the single canonical Meghalaya pilot AOI used for tile selection, DEM crop, GLC filter and negative sampling.",
+    "aoi_vs_state_bbox": {
+      "state_name": "Meghalaya",
+      "state_bbox": {
+        "min_lat": 25.0,
+        "max_lat": 26.1,
+        "min_lon": 89.8,
+        "max_lon": 92.8
+      },
+      "pilot_aoi": {
+        "min_lat": 25.0,
+        "max_lat": 25.99,
+        "min_lon": 91.0,
+        "max_lon": 92.8
+      },
+      "pilot_within_state": true,
+      "boxes_identical": false,
+      "differing_keys": [
+        "max_lat",
+        "min_lon"
+      ]
+    }
+  }
+}

@@ -198,13 +198,58 @@ ARUNACHAL_PILOT_AOI = {
     "max_lon": 94.5
 }
 
+# ---------------------------------------------------------------------------
+# MEGHALAYA PILOT AOI -- fourth pilot, same data pipeline as Assam / Arunachal
+# ---------------------------------------------------------------------------
+# Meghalaya's administrative box (25.0/26.1 lat, 89.8/92.8 lon) is a loose
+# ~1.1-by-3 degree over-approximation that spans two physiographically distinct
+# landslide clusters separated by a sparse gap: the western Garo Hills (~90.0 E)
+# and the dominant eastern Khasi + Jaintia Hills belt (~91.7-92.3 E). A
+# whole-admin-box 30 m DEM would be 8 Copernicus GLO-30 tiles for two disjoint
+# clusters -- most of the intervening terrain carries no catalogued events. This
+# AOI was therefore chosen DATA-DRIVEN from the real NASA GLC catalog: it covers
+# the single densest, most physiographically coherent belt -- the Shillong /
+# Cherrapunji southern scarp (India's highest-rainfall monsoon terrain) plus the
+# Jaintia Hills to its east.
+#
+# Real GLC positives inside this box (de-duplicated on lat/lon/date): 34, spanning
+# 29 independent event-dates. As with Sikkim (37), Assam (37) and Arunachal (40),
+# this is far below the >=100 independent dates the Option-A gate needs -- even the
+# ENTIRE administrative box yields only 38 -- so the Meghalaya pilot is Option-C by
+# construction, and the AOI was sized to maximise the coherent-belt positive count
+# against the 8 GB DEM/terrain budget (just 2 Copernicus GLO-30 tiles -- the leanest
+# of the four pilots). Positives are kept on the SAME pure-bbox rule as the other
+# pilots; the mixed jurisdiction breakdown (the box clips small parts of Assam and
+# Bangladesh's Sylhet division) is recorded in the events snapshot
+# (backend/data/models/meghalaya_events.json), never silently dropped.
+#
+# Exactly like the other pilot AOIs, editing these numbers changes which positives
+# the pilot trains on and the DEM / terrain rasters it derives. The AOI is required
+# to sit inside Meghalaya's administrative box;
+# assert_pilot_aoi_consistency("Meghalaya") enforces that.
+# NOTE ON max_lat = 25.99 (not 26.1): get_dem_tiles_for_bbox() selects tiles by
+# floor(min_lat)..floor(max_lat) inclusive, so a max_lat of 26.0+ floors to 26 and
+# pulls in a whole second tile row (N26*, covering 26-27 N) -- 4 GLO-30 tiles
+# instead of 2. Capping at 25.99 keeps the tile set at the intended 2 (row N25,
+# columns E091/E092); the only positives this excludes are the two northern-most
+# events near 26.0-26.1 N, which sit in the Guwahati fringe rather than the Khasi
+# belt this pilot models.
+MEGHALAYA_PILOT_AOI = {
+    "name": "Meghalaya pilot AOI (East Khasi + Jaintia Hills belt)",
+    "min_lat": 25.0,
+    "max_lat": 25.99,
+    "min_lon": 91.0,
+    "max_lon": 92.8
+}
+
 # Canonical pilot AOI per state. Kept OUTSIDE NER_STATES_CONFIG on purpose so the
 # shape of the state config dictionaries (which are iterated and partially
 # serialised by the validation sweep) is unchanged.
 PILOT_AOIS = {
     "Sikkim": EAST_SIKKIM_PILOT_AOI,
     "Assam": ASSAM_PILOT_AOI,
-    "Arunachal Pradesh": ARUNACHAL_PILOT_AOI
+    "Arunachal Pradesh": ARUNACHAL_PILOT_AOI,
+    "Meghalaya": MEGHALAYA_PILOT_AOI
 }
 
 

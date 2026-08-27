@@ -74,6 +74,19 @@ export const ARUNACHAL_PILOT_AOI: AdminBounds = {
   maxLon: 94.5,
 };
 
+/**
+ * Canonical Meghalaya pilot AOI — mirrors config_states.MEGHALAYA_PILOT_AOI exactly
+ * ("Meghalaya pilot AOI (East Khasi + Jaintia Hills belt)"). This is the single AOI
+ * the Meghalaya pilot model was actually trained on; it is deliberately narrower than
+ * Meghalaya's loose administrative bbox above.
+ */
+export const MEGHALAYA_PILOT_AOI: AdminBounds = {
+  minLat: 25.0,
+  maxLat: 25.99,
+  minLon: 91.0,
+  maxLon: 92.8,
+};
+
 function centroid(b: AdminBounds): [number, number] {
   return [(b.minLat + b.maxLat) / 2, (b.minLon + b.maxLon) / 2];
 }

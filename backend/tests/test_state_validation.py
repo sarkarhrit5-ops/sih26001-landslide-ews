@@ -475,3 +475,317 @@ def test_refresh_assam_missing_terrain_is_reported(tmp_path):
     # currently absent -- the DEM chip / blocker report that independently.
     assert rec["model_status"] == "Trained & Validated"
     assert rec["overall_status"] == "VALIDATED_PILOT"
+
+
+# ---------------------------------------------------------------------------
+# Serve-time Arunachal Pradesh refresh (refresh_arunachal_data_status)
+# ---------------------------------------------------------------------------
+# Identical situation to Assam: state_validation.json was written by an early NER
+# sweep before any Arunachal artifact existed, so its Arunachal Pradesh record
+# reports dem/exposure "Missing" and model "Not Trained". reconcile_validation_report
+# only downgrades unbacked VALIDATED_PILOT claims, and determine_overall_status only
+# consults the model-evidence gate for is_pilot states (Arunachal is is_pilot=False),
+# so neither lifts the stale values. refresh_arunachal_data_status closes that gap for
+# ARUNACHAL PRADESH ONLY, recomputing each field from a real on-disk artifact. These
+# tests drive the DEM and model-evidence branches off TEMP directories (so they never
+# depend on the checkout's large rasters); exposure is asserted to agree with the
+# existing evaluate_exposure_data() check against the committed arunachal_pradesh_osm.geojson.
+
+def _write_arunachal_terrain_rasters(data_dir):
+    """Create the five non-empty arunachal_pilot_* raster files the refresh checks for.
+    Placeholder bytes only -- the refresh checks existence + size, never opens them.
+    Layout matches arunachal_prediction.arunachal_terrain_raster_paths: DEM in raw/,
+    the four derivatives in processed/."""
+    raw = os.path.join(str(data_dir), "raw")
+    proc = os.path.join(str(data_dir), "processed")
+    os.makedirs(raw, exist_ok=True)
+    os.makedirs(proc, exist_ok=True)
+    with open(os.path.join(raw, "arunachal_pilot_dem.tif"), "wb") as fh:
+        fh.write(b"NOT-A-REAL-RASTER-PLACEHOLDER")
+    for name in ("slope", "aspect", "roughness", "tpi"):
+        with open(os.path.join(proc, "arunachal_pilot_%s.tif" % name), "wb") as fh:
+            fh.write(b"NOT-A-REAL-RASTER-PLACEHOLDER")
+
+
+def _stale_arunachal_record():
+    """A copy of the stale Arunachal record shape persisted in state_validation.json."""
+    return {
+        "id": "arunachal_pradesh", "state_id": "arunachal_pradesh",
+        "state": "Arunachal Pradesh", "state_name": "Arunachal Pradesh",
+        "processing_status": "COMPLETED",
+        "validation_status": "DATA UNAVAILABLE",
+        "overall_status": "DATA UNAVAILABLE",
+        "rainfall_source": "Open-Meteo / Fallback Synthetic",
+        "rainfall_status": "Fallback Active (Open-Meteo / Local)",
+        "inventory_events": 88, "usable_events": 88,
+        "spatial_quality": "Moderate/Poor", "temporal_quality": "Good",
+        "dem_status": "Missing (Requires Download)",
+        "exposure_status": "Missing (Requires Download)",
+        "model_status": "Not Trained",
+        "validation_metrics": {}, "risk_result": None,
+        "blocking_reasons": ["Missing DEM Data", "Missing OSM Exposure Data"],
+        "error": None,
+    }
+
+
+def test_is_arunachal_record_matches_by_id_or_name():
+    assert sv._is_arunachal_record({"state_id": "arunachal_pradesh"}) is True
+    assert sv._is_arunachal_record({"state_name": "Arunachal Pradesh"}) is True
+    assert sv._is_arunachal_record({"id": "ARUNACHAL_PRADESH"}) is True
+    assert sv._is_arunachal_record({"state": "  Arunachal Pradesh  "}) is True
+    assert sv._is_arunachal_record({"state_name": "Assam"}) is False
+    assert sv._is_arunachal_record({"state_name": "Sikkim"}) is False
+    assert sv._is_arunachal_record("not a dict") is False
+
+
+def test_refresh_arunachal_non_list_payload_returned_unchanged():
+    assert sv.refresh_arunachal_data_status({"not": "a list"}) == {"not": "a list"}
+    assert sv.refresh_arunachal_data_status(None) is None
+
+
+def test_refresh_leaves_non_arunachal_records_untouched(tmp_path):
+    import copy
+    sikkim = {"id": "sikkim", "state_name": "Sikkim", "overall_status": "VALIDATED_PILOT",
+              "dem_status": "Available", "model_status": "Trained & Validated"}
+    assam = {"id": "assam", "state_name": "Assam", "overall_status": "DATA UNAVAILABLE",
+             "dem_status": "Missing (Requires Download)"}
+    records = [copy.deepcopy(sikkim), _stale_arunachal_record(), copy.deepcopy(assam)]
+    out = sv.refresh_arunachal_data_status(
+        records, evidence_dir=str(tmp_path / "none"), data_dir=str(tmp_path / "none"))
+    assert out[0] == sikkim          # non-Arunachal record returned byte-identical
+    assert out[2] == assam           # non-Arunachal record returned byte-identical
+    assert out[1]["state_name"] == "Arunachal Pradesh"   # only Arunachal is refreshed
+
+
+def test_refresh_arunachal_upgrades_from_real_artifacts(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_arunachal_terrain_rasters(data_dir)
+    ev_dir = tmp_path / "models"
+    metrics = {"PR-AUC": 0.6013, "ROC-AUC": 0.7321, "F1": 0.548}  # fixture values
+    _write_evidence(ev_dir, "arunachal_pradesh", metrics=metrics)
+
+    records = [_stale_arunachal_record()]
+    out = sv.refresh_arunachal_data_status(
+        records, evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Available"
+    assert rec["model_status"] == "Trained & Validated"
+    assert rec["validation_metrics"] == metrics          # flowed from the file
+    assert rec["overall_status"] == "VALIDATED_PILOT"
+    assert rec["validation_status"] == "VALIDATED_PILOT"
+
+    # Exposure agrees with the existing check against the committed arunachal_pradesh_osm.geojson.
+    expected_exposure = sv.evaluate_exposure_data(
+        "Arunachal Pradesh", NER_STATES_CONFIG["Arunachal Pradesh"])
+    assert rec["exposure_status"] == expected_exposure
+
+    assert "Missing DEM Data" not in rec["blocking_reasons"]
+    assert not any("Persisted Validation Evidence" in b for b in rec["blocking_reasons"])
+    assert ("Missing OSM Exposure Data" in rec["blocking_reasons"]) == (
+        expected_exposure != "Available")
+
+    # The input record is copied, not mutated in place.
+    assert records[0]["dem_status"] == "Missing (Requires Download)"
+    assert records[0]["overall_status"] == "DATA UNAVAILABLE"
+
+
+def test_refresh_arunachal_incomplete_evidence_is_not_validated(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_arunachal_terrain_rasters(data_dir)
+    ev_dir = tmp_path / "empty_models"
+    os.makedirs(ev_dir, exist_ok=True)          # no arunachal_pradesh_* evidence files
+
+    out = sv.refresh_arunachal_data_status(
+        [_stale_arunachal_record()], evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Available"
+    assert rec["model_status"].startswith("Validation Required")
+    assert rec["validation_metrics"] == {}
+    assert rec["risk_result"] is None
+    assert any("Persisted Validation Evidence" in b for b in rec["blocking_reasons"])
+
+    expected_exposure = sv.evaluate_exposure_data(
+        "Arunachal Pradesh", NER_STATES_CONFIG["Arunachal Pradesh"])
+    if expected_exposure == "Available":
+        assert rec["overall_status"] == "VALIDATION_REQUIRED"
+    else:
+        assert rec["overall_status"] == "DATA UNAVAILABLE"
+
+
+def test_refresh_arunachal_missing_terrain_is_reported(tmp_path):
+    data_dir = tmp_path / "data"
+    os.makedirs(data_dir, exist_ok=True)        # no arunachal_pilot_* rasters
+    ev_dir = tmp_path / "models"
+    _write_evidence(ev_dir, "arunachal_pradesh", metrics={"PR-AUC": 0.6013, "ROC-AUC": 0.7321})
+
+    out = sv.refresh_arunachal_data_status(
+        [_stale_arunachal_record()], evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Missing (Requires Download)"
+    assert "Missing DEM Data" in rec["blocking_reasons"]
+    # Real persisted model evidence still earns "Trained & Validated" (evidence-
+    # gated, exactly like the Sikkim pilot contract) even though a live raster is
+    # currently absent -- the DEM chip / blocker report that independently.
+    assert rec["model_status"] == "Trained & Validated"
+    assert rec["overall_status"] == "VALIDATED_PILOT"
+
+
+# ---------------------------------------------------------------------------
+# Serve-time Meghalaya refresh (refresh_meghalaya_data_status)
+# ---------------------------------------------------------------------------
+# Identical situation to Assam / Arunachal Pradesh: state_validation.json was written
+# by an early NER sweep before any Meghalaya artifact existed, so its Meghalaya record
+# reports dem/exposure "Missing" and model "Not Trained". reconcile_validation_report
+# only downgrades unbacked VALIDATED_PILOT claims, and determine_overall_status only
+# consults the model-evidence gate for is_pilot states (Meghalaya is is_pilot=False),
+# so neither lifts the stale values. refresh_meghalaya_data_status closes that gap for
+# MEGHALAYA ONLY, recomputing each field from a real on-disk artifact. These tests
+# drive the DEM and model-evidence branches off TEMP directories (so they never depend
+# on the checkout's large rasters); exposure is asserted to agree with the existing
+# evaluate_exposure_data() check against the committed meghalaya_osm.geojson.
+
+def _write_meghalaya_terrain_rasters(data_dir):
+    """Create the five non-empty meghalaya_pilot_* raster files the refresh checks for.
+    Placeholder bytes only -- the refresh checks existence + size, never opens them.
+    Layout matches meghalaya_prediction.meghalaya_terrain_raster_paths: DEM in raw/,
+    the four derivatives in processed/."""
+    raw = os.path.join(str(data_dir), "raw")
+    proc = os.path.join(str(data_dir), "processed")
+    os.makedirs(raw, exist_ok=True)
+    os.makedirs(proc, exist_ok=True)
+    with open(os.path.join(raw, "meghalaya_pilot_dem.tif"), "wb") as fh:
+        fh.write(b"NOT-A-REAL-RASTER-PLACEHOLDER")
+    for name in ("slope", "aspect", "roughness", "tpi"):
+        with open(os.path.join(proc, "meghalaya_pilot_%s.tif" % name), "wb") as fh:
+            fh.write(b"NOT-A-REAL-RASTER-PLACEHOLDER")
+
+
+def _stale_meghalaya_record():
+    """A copy of the stale Meghalaya record shape persisted in state_validation.json."""
+    return {
+        "id": "meghalaya", "state_id": "meghalaya",
+        "state": "Meghalaya", "state_name": "Meghalaya",
+        "processing_status": "COMPLETED",
+        "validation_status": "DATA UNAVAILABLE",
+        "overall_status": "DATA UNAVAILABLE",
+        "rainfall_source": "Open-Meteo / Fallback Synthetic",
+        "rainfall_status": "Fallback Active (Open-Meteo / Local)",
+        "inventory_events": 34, "usable_events": 34,
+        "spatial_quality": "Moderate/Poor", "temporal_quality": "Good",
+        "dem_status": "Missing (Requires Download)",
+        "exposure_status": "Missing (Requires Download)",
+        "model_status": "Not Trained",
+        "validation_metrics": {}, "risk_result": None,
+        "blocking_reasons": ["Missing DEM Data", "Missing OSM Exposure Data"],
+        "error": None,
+    }
+
+
+def test_is_meghalaya_record_matches_by_id_or_name():
+    assert sv._is_meghalaya_record({"state_id": "meghalaya"}) is True
+    assert sv._is_meghalaya_record({"state_name": "Meghalaya"}) is True
+    assert sv._is_meghalaya_record({"id": "MEGHALAYA"}) is True
+    assert sv._is_meghalaya_record({"state": "  Meghalaya  "}) is True
+    assert sv._is_meghalaya_record({"state_name": "Assam"}) is False
+    assert sv._is_meghalaya_record({"state_name": "Arunachal Pradesh"}) is False
+    assert sv._is_meghalaya_record({"state_name": "Sikkim"}) is False
+    assert sv._is_meghalaya_record("not a dict") is False
+
+
+def test_refresh_meghalaya_non_list_payload_returned_unchanged():
+    assert sv.refresh_meghalaya_data_status({"not": "a list"}) == {"not": "a list"}
+    assert sv.refresh_meghalaya_data_status(None) is None
+
+
+def test_refresh_leaves_non_meghalaya_records_untouched(tmp_path):
+    import copy
+    sikkim = {"id": "sikkim", "state_name": "Sikkim", "overall_status": "VALIDATED_PILOT",
+              "dem_status": "Available", "model_status": "Trained & Validated"}
+    arunachal = {"id": "arunachal_pradesh", "state_name": "Arunachal Pradesh",
+                 "overall_status": "VALIDATED_PILOT", "dem_status": "Available"}
+    records = [copy.deepcopy(sikkim), _stale_meghalaya_record(), copy.deepcopy(arunachal)]
+    out = sv.refresh_meghalaya_data_status(
+        records, evidence_dir=str(tmp_path / "none"), data_dir=str(tmp_path / "none"))
+    assert out[0] == sikkim          # non-Meghalaya record returned byte-identical
+    assert out[2] == arunachal       # non-Meghalaya record returned byte-identical
+    assert out[1]["state_name"] == "Meghalaya"   # only Meghalaya is refreshed
+
+
+def test_refresh_meghalaya_upgrades_from_real_artifacts(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_meghalaya_terrain_rasters(data_dir)
+    ev_dir = tmp_path / "models"
+    metrics = {"PR-AUC": 0.3129, "ROC-AUC": 0.6188, "F1": 0.401}  # fixture values
+    _write_evidence(ev_dir, "meghalaya", metrics=metrics)
+
+    records = [_stale_meghalaya_record()]
+    out = sv.refresh_meghalaya_data_status(
+        records, evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Available"
+    assert rec["model_status"] == "Trained & Validated"
+    assert rec["validation_metrics"] == metrics          # flowed from the file
+    assert rec["overall_status"] == "VALIDATED_PILOT"
+    assert rec["validation_status"] == "VALIDATED_PILOT"
+
+    # Exposure agrees with the existing check against the committed meghalaya_osm.geojson.
+    expected_exposure = sv.evaluate_exposure_data(
+        "Meghalaya", NER_STATES_CONFIG["Meghalaya"])
+    assert rec["exposure_status"] == expected_exposure
+
+    assert "Missing DEM Data" not in rec["blocking_reasons"]
+    assert not any("Persisted Validation Evidence" in b for b in rec["blocking_reasons"])
+    assert ("Missing OSM Exposure Data" in rec["blocking_reasons"]) == (
+        expected_exposure != "Available")
+
+    # The input record is copied, not mutated in place.
+    assert records[0]["dem_status"] == "Missing (Requires Download)"
+    assert records[0]["overall_status"] == "DATA UNAVAILABLE"
+
+
+def test_refresh_meghalaya_incomplete_evidence_is_not_validated(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_meghalaya_terrain_rasters(data_dir)
+    ev_dir = tmp_path / "empty_models"
+    os.makedirs(ev_dir, exist_ok=True)          # no meghalaya_* evidence files
+
+    out = sv.refresh_meghalaya_data_status(
+        [_stale_meghalaya_record()], evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Available"
+    assert rec["model_status"].startswith("Validation Required")
+    assert rec["validation_metrics"] == {}
+    assert rec["risk_result"] is None
+    assert any("Persisted Validation Evidence" in b for b in rec["blocking_reasons"])
+
+    expected_exposure = sv.evaluate_exposure_data(
+        "Meghalaya", NER_STATES_CONFIG["Meghalaya"])
+    if expected_exposure == "Available":
+        assert rec["overall_status"] == "VALIDATION_REQUIRED"
+    else:
+        assert rec["overall_status"] == "DATA UNAVAILABLE"
+
+
+def test_refresh_meghalaya_missing_terrain_is_reported(tmp_path):
+    data_dir = tmp_path / "data"
+    os.makedirs(data_dir, exist_ok=True)        # no meghalaya_pilot_* rasters
+    ev_dir = tmp_path / "models"
+    _write_evidence(ev_dir, "meghalaya", metrics={"PR-AUC": 0.3129, "ROC-AUC": 0.6188})
+
+    out = sv.refresh_meghalaya_data_status(
+        [_stale_meghalaya_record()], evidence_dir=str(ev_dir), data_dir=str(data_dir))
+    rec = out[0]
+
+    assert rec["dem_status"] == "Missing (Requires Download)"
+    assert "Missing DEM Data" in rec["blocking_reasons"]
+    # Real persisted model evidence still earns "Trained & Validated" (evidence-
+    # gated, exactly like the Sikkim pilot contract) even though a live raster is
+    # currently absent -- the DEM chip / blocker report that independently.
+    assert rec["model_status"] == "Trained & Validated"
+    assert rec["overall_status"] == "VALIDATED_PILOT"
+

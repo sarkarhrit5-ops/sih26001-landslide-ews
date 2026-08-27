@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0.0",
+  "state": "Meghalaya",
+  "pilot_area": "East Khasi + Jaintia Hills belt",
+  "aoi": {
+    "min_lat": 25.0,
+    "max_lat": 25.99,
+    "min_lon": 91.0,
+    "max_lon": 92.8
+  },
+  "source": {
+    "product": "ESA WorldCover",
+    "version": "v200",
+    "year": 2021,
+    "resolution": "10 m",
+    "tiles": [
+      "N24E090"
+    ],
+    "bucket": "s3://esa-worldcover (AWS Open Data, eu-central-1, no credentials)",
+    "license": "CC-BY 4.0"
+  },
+  "raster": {
+    "path": "backend/data/raw/meghalaya_pilot_landcover.tif",
+    "rows": 11880,
+    "cols": 21600,
+    "pixel_size_deg": 8.333333333333333e-05,
+    "epsg": 4326,
+    "dtype": "uint8",
+    "nodata": 0.0,
+    "bounds_measured_from_file": {
+      "min_lat": 25.0,
+      "max_lat": 25.99,
+      "min_lon": 91.0,
+      "max_lon": 92.8
+    },
+    "fully_covers_canonical_aoi": true
+  },
+  "grouping": {
+    "note": "WorldCover codes are NOMINAL; grouped into a small set (the general collapse defined once in app.services.worldcover, named ASSAM_LANDCOVER_* there for historical reasons and reused verbatim for Meghalaya). land_cover_class must be treated as CATEGORICAL.",
+    "raw_code_to_group": {
+      "10": 1,
+      "20": 2,
+      "30": 2,
+      "40": 3,
+      "50": 4,
+      "60": 5,
+      "70": 5,
+      "80": 6,
+      "90": 6,
+      "95": 6,
+      "100": 2
+    },
+    "group_labels": {
+      "1": "forest (tree cover)",
+      "2": "shrub / grass / herbaceous",
+      "3": "cropland",
+      "4": "built-up",
+      "5": "bare / sparse / snow",
+      "6": "water / wetland"
+    }
+  },
+  "aoi_distribution": {
+    "raw_class_pixels": {
+      "10": 170665290,
+      "20": 3015,
+      "30": 43675958,
+      "40": 32344103,
+      "50": 1211680,
+      "60": 823512,
+      "80": 2369972,
+      "90": 5514470
+    },
+    "grouped_pixels": {
+      "1": {
+        "label": "forest (tree cover)",
+        "count": 170665290
+      },
+      "2": {
+        "label": "shrub / grass / herbaceous",
+        "count": 43678973
+      },
+      "3": {
+        "label": "cropland",
+        "count": 32344103
+      },
+      "4": {
+        "label": "built-up",
+        "count": 1211680
+      },
+      "5": {
+        "label": "bare / sparse / snow",
+        "count": 823512
+      },
+      "6": {
+        "label": "water / wetland",
+        "count": 7884442
+      }
+    },
+    "nodata_pixels": 0,
+    "total_pixels": 256608000
+  },
+  "event_distribution": {
+    "n_events": 34,
+    "grouped": {
+      "1": {
+        "label": "forest (tree cover)",
+        "count": 19
+      },
+      "2": {
+        "label": "shrub / grass / herbaceous",
+        "count": 6
+      },
+      "3": {
+        "label": "cropland",
+        "count": 4
+      },
+      "4": {
+        "label": "built-up",
+        "count": 3
+      },
+      "5": {
+        "label": "bare / sparse / snow",
+        "count": 2
+      },
+      "6": {
+        "label": "water / wetland",
+        "count": 0
+      }
+    },
+    "unavailable_nodata_events": 0
+  },
+  "generated_at": "2026-08-27T13:23:06Z"
+}

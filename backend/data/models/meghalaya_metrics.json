@@ -1,0 +1,153 @@
+{
+  "metrics_schema_version": "1.0.0",
+  "state": "Meghalaya",
+  "pilot_area": "East Khasi + Jaintia Hills belt",
+  "validation_metrics": {
+    "PR-AUC": 0.2909,
+    "ROC-AUC": 0.4725,
+    "Precision": 0.5,
+    "Recall": 0.1364,
+    "F1": 0.2143,
+    "False Alarm Rate": 0.0455
+  },
+  "metrics_source": "computed_from_validation_run",
+  "status": "REAL/COMPUTED",
+  "primary_model": "LightGBM",
+  "primary_evaluation": "temporal_holdout / static_plus_rainfall",
+  "feature_set": "static_plus_rainfall",
+  "holdout_details": {
+    "spatial_holdout": "Latitude median split (train <= median, test > median)",
+    "temporal_holdout": "Event year split (train <= 2014, test >= 2015)",
+    "decision_threshold": 0.5
+  },
+  "sample_counts": {
+    "total_samples": 136,
+    "positive_samples": 34,
+    "negative_samples": 102,
+    "primary_train_samples": 48,
+    "primary_test_samples": 88,
+    "primary_train_positives": 12,
+    "primary_test_positives": 22
+  },
+  "model_comparison": {
+    "spatial_holdout": {
+      "static_only": {
+        "Logistic Regression": {
+          "PR-AUC": 0.2634,
+          "ROC-AUC": 0.5178,
+          "Precision": 0.0,
+          "Recall": 0.0,
+          "F1": 0.0,
+          "False Alarm Rate": 0.04
+        },
+        "Random Forest": {
+          "PR-AUC": 0.4415,
+          "ROC-AUC": 0.7156,
+          "Precision": 0.5,
+          "Recall": 0.1111,
+          "F1": 0.1818,
+          "False Alarm Rate": 0.04
+        },
+        "LightGBM": {
+          "PR-AUC": 0.3788,
+          "ROC-AUC": 0.6761,
+          "Precision": 0.5,
+          "Recall": 0.1667,
+          "F1": 0.25,
+          "False Alarm Rate": 0.06
+        }
+      },
+      "static_plus_rainfall": {
+        "Logistic Regression": {
+          "PR-AUC": 0.2267,
+          "ROC-AUC": 0.4144,
+          "Precision": 0.0,
+          "Recall": 0.0,
+          "F1": 0.0,
+          "False Alarm Rate": 0.12
+        },
+        "Random Forest": {
+          "PR-AUC": 0.3067,
+          "ROC-AUC": 0.5467,
+          "Precision": 0.25,
+          "Recall": 0.0556,
+          "F1": 0.0909,
+          "False Alarm Rate": 0.06
+        },
+        "LightGBM": {
+          "PR-AUC": 0.31,
+          "ROC-AUC": 0.58,
+          "Precision": 0.2,
+          "Recall": 0.0556,
+          "F1": 0.087,
+          "False Alarm Rate": 0.08
+        }
+      }
+    },
+    "temporal_holdout": {
+      "static_only": {
+        "Logistic Regression": {
+          "PR-AUC": 0.2208,
+          "ROC-AUC": 0.3657,
+          "Precision": 0.5,
+          "Recall": 0.0455,
+          "F1": 0.0833,
+          "False Alarm Rate": 0.0152
+        },
+        "Random Forest": {
+          "PR-AUC": 0.2345,
+          "ROC-AUC": 0.4043,
+          "Precision": 0.1111,
+          "Recall": 0.0455,
+          "F1": 0.0645,
+          "False Alarm Rate": 0.1212
+        },
+        "LightGBM": {
+          "PR-AUC": 0.3036,
+          "ROC-AUC": 0.4817,
+          "Precision": 0.5,
+          "Recall": 0.0455,
+          "F1": 0.0833,
+          "False Alarm Rate": 0.0152
+        }
+      },
+      "static_plus_rainfall": {
+        "Logistic Regression": {
+          "PR-AUC": 0.2196,
+          "ROC-AUC": 0.3788,
+          "Precision": 0.5,
+          "Recall": 0.0455,
+          "F1": 0.0833,
+          "False Alarm Rate": 0.0152
+        },
+        "Random Forest": {
+          "PR-AUC": 0.2666,
+          "ROC-AUC": 0.4817,
+          "Precision": 0.4,
+          "Recall": 0.0909,
+          "F1": 0.1481,
+          "False Alarm Rate": 0.0455
+        },
+        "LightGBM": {
+          "PR-AUC": 0.2909,
+          "ROC-AUC": 0.4725,
+          "Precision": 0.5,
+          "Recall": 0.1364,
+          "F1": 0.2143,
+          "False Alarm Rate": 0.0455
+        }
+      }
+    }
+  },
+  "model_decision": {
+    "final_recommendation": "Option C: Static Susceptibility + IMERG Rainfall Thresholds + Forecast Risk",
+    "justification_reasons": [
+      "High spatial uncertainty: 76.5% of cataloged events have spatial uncertainty >= 5 km.",
+      "Limited temporal sample size: Only 29 independent event dates available for temporal training.",
+      "Temporal ML validation instability: Holdout False Alarm Rate (0.05) or PR-AUC (0.29) indicates poor temporal generalization."
+    ]
+  },
+  "dataset_provenance_reference": "D:\\landslide\\sih26001-landslide-ews\\backend\\data\\processed\\meghalaya_pilot_training_matrix.parquet",
+  "generated_at": "2026-08-27T13:24:22Z",
+  "note": "All numbers in validation_metrics and model_comparison were computed by ml_pipeline.compute_metrics() during the run identified by dataset_provenance_reference and the companion provenance artifact. They are not copied from any documentary/historical reference figures."
+}

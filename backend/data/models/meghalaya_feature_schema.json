@@ -1,0 +1,61 @@
+{
+  "feature_schema_version": "1.0.0",
+  "state": "Meghalaya",
+  "feature_set_name": "static_plus_rainfall",
+  "feature_names": [
+    "elevation",
+    "slope",
+    "aspect",
+    "roughness",
+    "tpi",
+    "land_cover_class",
+    "rain_1d",
+    "rain_3d",
+    "rain_7d",
+    "antecedent_rain_14d",
+    "rain_intensity_max_3d"
+  ],
+  "feature_order": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "n_features": 11,
+  "dtype": {
+    "elevation": "float32",
+    "slope": "float32",
+    "aspect": "float32",
+    "roughness": "float32",
+    "tpi": "float32",
+    "land_cover_class": "category",
+    "rain_1d": "float32",
+    "rain_3d": "float32",
+    "rain_7d": "float32",
+    "antecedent_rain_14d": "float32",
+    "rain_intensity_max_3d": "float32"
+  },
+  "meaning": {
+    "elevation": "Terrain elevation in metres, sampled from the Copernicus GLO-30 DEM.",
+    "slope": "Terrain slope in degrees, derived from the DEM.",
+    "aspect": "Terrain aspect in degrees clockwise from north, derived from the DEM.",
+    "roughness": "Local terrain roughness, derived from the DEM.",
+    "tpi": "Topographic Position Index, derived from the DEM.",
+    "land_cover_class": "REAL observed land cover (NOT an elevation proxy): ESA WorldCover v200 (2021), sampled at each point and grouped into NOMINAL classes: 1 = forest (tree cover), 2 = shrub / grass / herbaceous, 3 = cropland, 4 = built-up, 5 = bare / sparse / snow, 6 = water / wetland. Treated as CATEGORICAL for the LightGBM primary model via categorical_feature=['land_cover_class'] (never ordinal). Cells with no WorldCover data use sentinel -1 and the affected rows are dropped, never imputed.",
+    "rain_1d": "Precipitation total on day T-1 in mm (antecedent, no future leakage).",
+    "rain_3d": "Cumulative precipitation over T-3..T-1 in mm.",
+    "rain_7d": "Cumulative precipitation over T-7..T-1 in mm.",
+    "antecedent_rain_14d": "Cumulative precipitation over T-14..T-1 in mm.",
+    "rain_intensity_max_3d": "Maximum single-day precipitation over T-3..T-1 in mm/day."
+  },
+  "target_column": "target",
+  "generated_at": "2026-08-27T13:24:22Z",
+  "note": "Captured from the exact feature matrix used to fit the persisted model. Inference must supply these features in this order."
+}

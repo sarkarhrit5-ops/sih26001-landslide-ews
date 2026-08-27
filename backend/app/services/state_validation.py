@@ -650,6 +650,310 @@ def refresh_assam_data_status(records: Any, evidence_dir: str = None,
     ]
 
 
+# ---------------------------------------------------------------------------
+# Serve-time refresh of the ARUNACHAL PRADESH record against real on-disk artifacts
+# ---------------------------------------------------------------------------
+# Identical situation to Assam (see the block above): data/processed/state_validation.json
+# was written by an early NER sweep before any Arunachal artifact existed, so its
+# Arunachal Pradesh record still reports dem_status/exposure_status
+# "Missing (Requires Download)" and model_status "Not Trained". Those artifacts now
+# exist and are real:
+#   * terrain  -- the five arunachal_pilot_* rasters the Arunachal model was trained
+#                 on (DEM at data/raw/arunachal_pilot_dem.tif + the four derivatives
+#                 at data/processed/arunachal_pilot_<name>.tif); NOT "arunachal_dem.tif",
+#                 the name the generic evaluate_terrain_data looks for and which never
+#                 existed for Arunachal;
+#   * exposure -- data/raw/arunachal_pradesh_osm.geojson (real OSM features);
+#   * model    -- the persisted arunachal_pradesh_model.pkl + arunachal_pradesh_metrics.json
+#                 + arunachal_pradesh_feature_schema.json evidence bundle.
+# Neither reconcile_validation_report (downgrade-only) nor determine_overall_status
+# (whose model-evidence gate is consulted only for is_pilot states -- Arunachal is
+# is_pilot=False) lifts the stale values. This serve-time refresh closes both gaps for
+# ARUNACHAL PRADESH ONLY. It recomputes each field from a real artifact (or leaves it
+# unavailable), never rewrites the on-disk file, and returns every other state's record
+# unchanged. It fabricates nothing: metrics are read verbatim from
+# arunachal_pradesh_metrics.json and a field is reported "Available" / "Trained &
+# Validated" only when its real backing artifact is present.
+
+
+def _is_arunachal_record(record: Any) -> bool:
+    """True iff a loaded validation record identifies the state of Arunachal Pradesh."""
+    if not isinstance(record, dict):
+        return False
+    for key in ("state_id", "id", "state_name", "state"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip().lower().replace(" ", "_") == "arunachal_pradesh":
+            return True
+    return False
+
+
+def _arunachal_dem_available(data_dir: str = None):
+    """
+    True / False when the real Arunachal terrain rasters can be checked on disk, else
+    None (could not check).
+
+    Reuses arunachal_prediction's OWN terrain-path source of truth -- the five
+    arunachal_pilot_* rasters the model was trained on -- so the dashboard's DEM status
+    agrees with what the Arunachal predictor actually reads, rather than the generic
+    evaluate_terrain_data(), which looks for a differently-named "arunachal_dem.tif"
+    that never existed for Arunachal. Imported lazily so this module still imports
+    cleanly in the offline test sandbox (arunachal_prediction pulls in risk_inputs /
+    worldcover / sikkim_prediction). Only existence + non-empty size are checked here;
+    the rasters are never opened (no rasterio needed).
+    """
+    try:
+        from app.services import arunachal_prediction
+        return not arunachal_prediction.missing_arunachal_terrain_rasters(data_dir)
+    except Exception:
+        return None
+
+
+def _recompute_arunachal_blockers(refreshed: Dict[str, Any], evidence: Dict[str, Any]) -> list:
+    """
+    Rebuild the Arunachal blocking_reasons from the refreshed field states: preserve
+    any pre-existing reason this refresh does not own (e.g. an inventory note) and
+    (re)raise only the DEM / OSM / model-evidence blockers whose backing artifact is
+    actually absent right now.
+    """
+    owned_prefixes = ("Missing DEM Data", "Missing OSM Exposure Data",
+                      "Missing Persisted Validation Evidence")
+    blockers = [
+        b for b in (refreshed.get("blocking_reasons") or [])
+        if not any(str(b).startswith(p) for p in owned_prefixes)
+    ]
+    if refreshed.get("dem_status") != "Available":
+        blockers.append("Missing DEM Data")
+    if refreshed.get("exposure_status") != "Available":
+        blockers.append("Missing OSM Exposure Data")
+    if not evidence.get("complete"):
+        blockers.append(
+            "Missing Persisted Validation Evidence ("
+            + ", ".join(evidence.get("missing", [])) + ")"
+        )
+    return blockers
+
+
+def _refresh_arunachal_record(record: Dict[str, Any], evidence_dir: str = None,
+                              data_dir: str = None) -> Dict[str, Any]:
+    """Return a refreshed COPY of a single Arunachal record (input left unmutated)."""
+    refreshed = dict(record)
+
+    # --- DEM / terrain: real arunachal_pilot_* rasters -----------------------
+    dem_available = _arunachal_dem_available(data_dir)
+    if dem_available is True:
+        refreshed["dem_status"] = "Available"
+    elif dem_available is False:
+        refreshed["dem_status"] = "Missing (Requires Download)"
+    # None -> could not check -> leave the stored value untouched.
+
+    # --- Exposure: real arunachal_pradesh_osm.geojson (existing check) --------
+    config = NER_STATES_CONFIG.get("Arunachal Pradesh")
+    if config is not None:
+        refreshed["exposure_status"] = evaluate_exposure_data("Arunachal Pradesh", config)
+
+    # --- Model evidence: persisted model + metrics + schema -------------------
+    # Arunachal is the project's 3rd pilot; this is exactly the persisted-evidence
+    # contract that already justifies Sikkim's and Assam's VALIDATED_PILOT. Metrics
+    # come verbatim from arunachal_pradesh_metrics.json -- never hardcoded here.
+    evidence = load_validation_evidence("Arunachal Pradesh", base_dir=evidence_dir)
+    if evidence["complete"]:
+        refreshed["model_status"] = "Trained & Validated"
+        refreshed["validation_metrics"] = evidence["metrics"]
+        if evidence["risk_result"] is not None:
+            refreshed["risk_result"] = evidence["risk_result"]
+    else:
+        refreshed["model_status"] = (
+            "Validation Required (Persisted Model/Metrics Artifacts Absent)"
+        )
+        refreshed["validation_metrics"] = {}
+        refreshed["risk_result"] = None
+
+    # --- Overall status, coherent with the refreshed sub-states ----------------
+    # Evidence-gated exactly like the pilot contract in determine_overall_status:
+    # a real persisted model+metrics is what earns VALIDATED_PILOT. When evidence
+    # is absent we fall back to an honest data-availability status instead.
+    if evidence["complete"]:
+        overall = "VALIDATED_PILOT"
+    elif (refreshed.get("dem_status") == "Available"
+          and refreshed.get("exposure_status") == "Available"):
+        overall = "VALIDATION_REQUIRED"
+    else:
+        overall = "DATA UNAVAILABLE"
+    refreshed["overall_status"] = overall
+    refreshed["validation_status"] = overall
+
+    refreshed["blocking_reasons"] = _recompute_arunachal_blockers(refreshed, evidence)
+    return refreshed
+
+
+def refresh_arunachal_data_status(records: Any, evidence_dir: str = None,
+                                  data_dir: str = None) -> Any:
+    """
+    Return the loaded validation report with ONLY the Arunachal Pradesh record
+    refreshed against the real Arunachal artifacts now on disk; every other record
+    (and a non-list payload) is returned unchanged. Never rewrites state_validation.json.
+    """
+    if not isinstance(records, list):
+        return records
+    return [
+        _refresh_arunachal_record(r, evidence_dir=evidence_dir, data_dir=data_dir)
+        if _is_arunachal_record(r) else r
+        for r in records
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Serve-time refresh of the MEGHALAYA record against real on-disk artifacts
+# ---------------------------------------------------------------------------
+# Identical situation to Assam / Arunachal (see the two blocks above):
+# data/processed/state_validation.json was written by an early NER sweep before any
+# Meghalaya artifact existed, so its Meghalaya record still reports
+# dem_status/exposure_status "Missing (Requires Download)" and model_status
+# "Not Trained". Those artifacts now exist and are real:
+#   * terrain  -- the five meghalaya_pilot_* rasters the Meghalaya model was trained
+#                 on (DEM at data/raw/meghalaya_pilot_dem.tif + the four derivatives
+#                 at data/processed/meghalaya_pilot_<name>.tif); NOT "meghalaya_dem.tif",
+#                 the name the generic evaluate_terrain_data looks for and which never
+#                 existed for Meghalaya;
+#   * exposure -- data/raw/meghalaya_osm.geojson (real OSM features);
+#   * model    -- the persisted meghalaya_model.pkl + meghalaya_metrics.json
+#                 + meghalaya_feature_schema.json evidence bundle.
+# Neither reconcile_validation_report (downgrade-only) nor determine_overall_status
+# (whose model-evidence gate is consulted only for is_pilot states -- Meghalaya is
+# is_pilot=False) lifts the stale values. This serve-time refresh closes both gaps for
+# MEGHALAYA ONLY. It recomputes each field from a real artifact (or leaves it
+# unavailable), never rewrites the on-disk file, and returns every other state's record
+# unchanged. It fabricates nothing: metrics are read verbatim from
+# meghalaya_metrics.json and a field is reported "Available" / "Trained & Validated"
+# only when its real backing artifact is present.
+
+
+def _is_meghalaya_record(record: Any) -> bool:
+    """True iff a loaded validation record identifies the state of Meghalaya."""
+    if not isinstance(record, dict):
+        return False
+    for key in ("state_id", "id", "state_name", "state"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip().lower().replace(" ", "_") == "meghalaya":
+            return True
+    return False
+
+
+def _meghalaya_dem_available(data_dir: str = None):
+    """
+    True / False when the real Meghalaya terrain rasters can be checked on disk, else
+    None (could not check).
+
+    Reuses meghalaya_prediction's OWN terrain-path source of truth -- the five
+    meghalaya_pilot_* rasters the model was trained on -- so the dashboard's DEM status
+    agrees with what the Meghalaya predictor actually reads, rather than the generic
+    evaluate_terrain_data(), which looks for a differently-named "meghalaya_dem.tif"
+    that never existed for Meghalaya. Imported lazily so this module still imports
+    cleanly in the offline test sandbox (meghalaya_prediction pulls in risk_inputs /
+    worldcover / sikkim_prediction). Only existence + non-empty size are checked here;
+    the rasters are never opened (no rasterio needed).
+    """
+    try:
+        from app.services import meghalaya_prediction
+        return not meghalaya_prediction.missing_meghalaya_terrain_rasters(data_dir)
+    except Exception:
+        return None
+
+
+def _recompute_meghalaya_blockers(refreshed: Dict[str, Any], evidence: Dict[str, Any]) -> list:
+    """
+    Rebuild the Meghalaya blocking_reasons from the refreshed field states: preserve
+    any pre-existing reason this refresh does not own (e.g. an inventory note) and
+    (re)raise only the DEM / OSM / model-evidence blockers whose backing artifact is
+    actually absent right now.
+    """
+    owned_prefixes = ("Missing DEM Data", "Missing OSM Exposure Data",
+                      "Missing Persisted Validation Evidence")
+    blockers = [
+        b for b in (refreshed.get("blocking_reasons") or [])
+        if not any(str(b).startswith(p) for p in owned_prefixes)
+    ]
+    if refreshed.get("dem_status") != "Available":
+        blockers.append("Missing DEM Data")
+    if refreshed.get("exposure_status") != "Available":
+        blockers.append("Missing OSM Exposure Data")
+    if not evidence.get("complete"):
+        blockers.append(
+            "Missing Persisted Validation Evidence ("
+            + ", ".join(evidence.get("missing", [])) + ")"
+        )
+    return blockers
+
+
+def _refresh_meghalaya_record(record: Dict[str, Any], evidence_dir: str = None,
+                              data_dir: str = None) -> Dict[str, Any]:
+    """Return a refreshed COPY of a single Meghalaya record (input left unmutated)."""
+    refreshed = dict(record)
+
+    # --- DEM / terrain: real meghalaya_pilot_* rasters -----------------------
+    dem_available = _meghalaya_dem_available(data_dir)
+    if dem_available is True:
+        refreshed["dem_status"] = "Available"
+    elif dem_available is False:
+        refreshed["dem_status"] = "Missing (Requires Download)"
+    # None -> could not check -> leave the stored value untouched.
+
+    # --- Exposure: real meghalaya_osm.geojson (existing check) ----------------
+    config = NER_STATES_CONFIG.get("Meghalaya")
+    if config is not None:
+        refreshed["exposure_status"] = evaluate_exposure_data("Meghalaya", config)
+
+    # --- Model evidence: persisted model + metrics + schema -------------------
+    # Meghalaya is the project's 4th pilot; this is exactly the persisted-evidence
+    # contract that already justifies Sikkim's / Assam's / Arunachal's VALIDATED_PILOT.
+    # Metrics come verbatim from meghalaya_metrics.json -- never hardcoded here.
+    evidence = load_validation_evidence("Meghalaya", base_dir=evidence_dir)
+    if evidence["complete"]:
+        refreshed["model_status"] = "Trained & Validated"
+        refreshed["validation_metrics"] = evidence["metrics"]
+        if evidence["risk_result"] is not None:
+            refreshed["risk_result"] = evidence["risk_result"]
+    else:
+        refreshed["model_status"] = (
+            "Validation Required (Persisted Model/Metrics Artifacts Absent)"
+        )
+        refreshed["validation_metrics"] = {}
+        refreshed["risk_result"] = None
+
+    # --- Overall status, coherent with the refreshed sub-states ----------------
+    # Evidence-gated exactly like the pilot contract in determine_overall_status:
+    # a real persisted model+metrics is what earns VALIDATED_PILOT. When evidence
+    # is absent we fall back to an honest data-availability status instead.
+    if evidence["complete"]:
+        overall = "VALIDATED_PILOT"
+    elif (refreshed.get("dem_status") == "Available"
+          and refreshed.get("exposure_status") == "Available"):
+        overall = "VALIDATION_REQUIRED"
+    else:
+        overall = "DATA UNAVAILABLE"
+    refreshed["overall_status"] = overall
+    refreshed["validation_status"] = overall
+
+    refreshed["blocking_reasons"] = _recompute_meghalaya_blockers(refreshed, evidence)
+    return refreshed
+
+
+def refresh_meghalaya_data_status(records: Any, evidence_dir: str = None,
+                                  data_dir: str = None) -> Any:
+    """
+    Return the loaded validation report with ONLY the Meghalaya record refreshed
+    against the real Meghalaya artifacts now on disk; every other record (and a
+    non-list payload) is returned unchanged. Never rewrites state_validation.json.
+    """
+    if not isinstance(records, list):
+        return records
+    return [
+        _refresh_meghalaya_record(r, evidence_dir=evidence_dir, data_dir=data_dir)
+        if _is_meghalaya_record(r) else r
+        for r in records
+    ]
+
+
 def compute_inventory_diagnostics(state_name: str, config: Dict[str, Any], glc_df: pd.DataFrame) -> dict:
     raw_india = glc_df[glc_df['country_name'] == 'India']
     raw_india_count = len(raw_india)

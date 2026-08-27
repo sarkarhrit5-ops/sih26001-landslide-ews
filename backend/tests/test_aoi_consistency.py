@@ -25,6 +25,7 @@ from app.core.config_states import (
     ASSAM_PILOT_AOI,
     BBOX_KEYS,
     EAST_SIKKIM_PILOT_AOI,
+    MEGHALAYA_PILOT_AOI,
     NER_STATES_CONFIG,
     PILOT_AOIS,
     aoi_bounds_tuple,
@@ -205,6 +206,38 @@ def test_arunachal_pilot_aoi_is_contained_in_its_administrative_bbox():
     assert report["state_bbox"] == get_state_bbox("Arunachal Pradesh")
     assert report["pilot_aoi"] == get_pilot_aoi_bounds("Arunachal Pradesh")
     assert assert_pilot_aoi_consistency("Arunachal Pradesh")["pilot_within_state"] is True
+
+
+def test_meghalaya_pilot_aoi_is_registered_and_points_at_the_canonical_object():
+    """Meghalaya is the fourth pilot: it now has a canonical AOI registered."""
+    assert "Meghalaya" in PILOT_AOIS
+    assert PILOT_AOIS["Meghalaya"] is MEGHALAYA_PILOT_AOI
+
+
+def test_meghalaya_pilot_aoi_has_expected_bounds():
+    """
+    The Meghalaya pilot AOI is pinned here (the single place these numbers are
+    asserted). It was chosen data-driven to cover the East Khasi + Jaintia Hills
+    belt (the Shillong/Cherrapunji scarp); changing it changes the Meghalaya
+    positives and the DEM/terrain rasters, so it must be a deliberate act. Note
+    max_lat is 25.99 (not 26.1) on purpose: a max_lat of 26.0+ floors to a second
+    DEM tile row (see the get_dem_tiles_for_bbox test below and the comment in
+    config_states.py).
+    """
+    assert get_pilot_aoi_bounds("Meghalaya") == {
+        "min_lat": 25.0,
+        "max_lat": 25.99,
+        "min_lon": 91.0,
+        "max_lon": 92.8,
+    }
+
+
+def test_meghalaya_pilot_aoi_is_contained_in_its_administrative_bbox():
+    report = check_pilot_aoi_consistency("Meghalaya")
+    assert report["pilot_within_state"] is True
+    assert report["state_bbox"] == get_state_bbox("Meghalaya")
+    assert report["pilot_aoi"] == get_pilot_aoi_bounds("Meghalaya")
+    assert assert_pilot_aoi_consistency("Meghalaya")["pilot_within_state"] is True
 
 
 def test_aoi_bounds_tuple_uses_rasterio_west_south_east_north_order():
@@ -395,3 +428,19 @@ def test_arunachal_dem_tiles_derived_from_the_canonical_aoi():
 
     tiles = state_validation.get_dem_tiles_for_bbox(get_pilot_aoi_bounds("Arunachal Pradesh"))
     assert tiles == [(26, 92), (26, 93), (26, 94), (27, 92), (27, 93), (27, 94)]
+
+
+def test_meghalaya_dem_tiles_derived_from_the_canonical_aoi():
+    """
+    The Meghalaya pilot AOI must resolve to exactly two Copernicus GLO-30 tiles
+    (row N25, columns E091/E092) -- the DEM/terrain prep that
+    scripts/prepare_meghalaya_terrain.py downloads. This is the reason max_lat is
+    25.99 rather than 26.1: get_dem_tiles_for_bbox floors max_lat, so 26.0+ would
+    floor to 26 and pull in a second tile row (N26*) that lies mostly outside the
+    AOI, doubling the mosaic to four tiles. Skipped offline when state_validation's
+    import chain is unavailable.
+    """
+    state_validation = pytest.importorskip("app.services.state_validation")
+
+    tiles = state_validation.get_dem_tiles_for_bbox(get_pilot_aoi_bounds("Meghalaya"))
+    assert tiles == [(25, 91), (25, 92)]
