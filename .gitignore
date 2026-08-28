@@ -33,6 +33,6 @@ build/
 .DS_Store
 Thumbs.db
 backend/data/raw/
-backend/data/processed/
-backend/data/models/*.pkl
+# backend/data/processed/
+# backend/data/models/*.pkl
 backend/data/models/*.joblib
