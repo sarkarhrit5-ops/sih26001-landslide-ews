@@ -78,7 +78,19 @@ export interface SystemHealthResponse {
   status: string;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+/**
+ * Base URL that every backend request below is prefixed with (see fetchJson:
+ * `${API_BASE_URL}${endpoint}`). Each endpoint string already carries its own
+ * "/api/v1/..." (or "/health") path, so this only controls the origin.
+ *
+ * - Deployed / cross-origin: set VITE_API_URL (e.g. "https://api.example.com") and
+ *   all requests become VITE_API_URL + "/api/v1/..." — no route strings change.
+ * - Local development: leave VITE_API_URL unset. The fallback is an empty string, so
+ *   requests stay relative ("/api/v1/...", "/health") and the Vite dev server proxies
+ *   them to the FastAPI backend (vite.config.ts → server.proxy for "/api" and
+ *   "/health"). This is the existing local "/api" development path, unchanged.
+ */
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export interface StateValidationReport {
   id?: string;
