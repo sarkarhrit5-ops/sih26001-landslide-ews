@@ -10,7 +10,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "https://sih26001-landslide-qeel0211q2-lazy-coders2.vercel.app",
+    "https://sih26001-landslide-ews.vercel.app/",
 ],
     allow_credentials=True,
     allow_methods=["*"],
