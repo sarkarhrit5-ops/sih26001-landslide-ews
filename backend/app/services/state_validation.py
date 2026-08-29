@@ -97,7 +97,8 @@ def resolve_state_dem_filename(state_name: str) -> str:
     return PILOT_DEM_FILENAMES.get(state_name.strip().lower(), f"{clean_state_name}_dem.tif")
 
 
-def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
+def acquire_state_dem(state_name: str, state_config: Dict[str, Any],
+                      limit_tiles: bool = True) -> str:
     """
     State-aware DEM downloader, loader, cache manager, mosaic, and cropper.
     Returns path of the compiled state DEM file.
@@ -107,6 +108,14 @@ def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
     a redundant copy. If that file is absent (e.g. a fresh production checkout),
     the Copernicus tile acquisition path below runs unchanged and writes the
     mosaic to that same pilot filename. Availability is never assumed.
+
+    limit_tiles (default True) preserves the historical 8-state-sweep behaviour:
+    downloads are capped to a 2x2 tile grid around the bbox centre so a wide
+    administrative box cannot pull 28-40 tiles. Pass limit_tiles=False to fetch
+    EVERY tile the given bbox needs -- what the pilot terrain drivers
+    (scripts/prepare_<state>_terrain.py) do, and what pilot bootstrap needs so the
+    mosaic actually covers the whole pilot AOI. Nothing else differs between the
+    two modes.
     """
     import math
     import urllib.request
@@ -121,11 +130,11 @@ def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
     os.makedirs(dem_cache_dir, exist_ok=True)
 
     state_dem_path = os.path.join(raw_dir, resolve_state_dem_filename(state_name))
-    
+
     # If already compiled and valid, reuse it!
     if os.path.exists(state_dem_path) and os.path.getsize(state_dem_path) > 1000:
         return state_dem_path
-        
+
     # Sikkim pilot already exists locally
     if state_config.get("is_pilot"):
         pilot_path = os.path.join(raw_dir, "east_sikkim_dem.tif")
@@ -133,30 +142,40 @@ def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
             import shutil
             shutil.copy2(pilot_path, state_dem_path)
             return state_dem_path
-            
+
     # Solve state bounding box tiles
     tiles = get_dem_tiles_for_bbox(state_config)
-    
-    # Limit maximum downloads to a 2x2 grid around the center of the bounding box
-    # to avoid huge downloads of 28-40 tiles that exceed timeout/disk limits.
-    lat_center = (state_config["min_lat"] + state_config["max_lat"]) / 2.0
-    lon_center = (state_config["min_lon"] + state_config["max_lon"]) / 2.0
-    c_lat = int(math.floor(lat_center))
-    c_lon = int(math.floor(lon_center))
-    
-    target_tiles = [
-        (c_lat, c_lon),
-        (c_lat + 1, c_lon),
-        (c_lat, c_lon + 1),
-        (c_lat + 1, c_lon + 1),
-    ]
-    
-    subset_tiles = [t for t in tiles if t in target_tiles]
-    if not subset_tiles:
-        subset_tiles = [(c_lat, c_lon)]
-        
+
+    if not limit_tiles:
+        # Uncapped: every tile the bbox needs (pilot AOIs are small enough that
+        # this is 2-6 tiles, and a partial mosaic would leave real AOI cells with
+        # no terrain at all).
+        subset_tiles = list(tiles)
+        if not subset_tiles:
+            raise RuntimeError(
+                f"No Copernicus tiles resolved for {state_name} from bbox {state_config}."
+            )
+    else:
+        # Limit maximum downloads to a 2x2 grid around the center of the bounding box
+        # to avoid huge downloads of 28-40 tiles that exceed timeout/disk limits.
+        lat_center = (state_config["min_lat"] + state_config["max_lat"]) / 2.0
+        lon_center = (state_config["min_lon"] + state_config["max_lon"]) / 2.0
+        c_lat = int(math.floor(lat_center))
+        c_lon = int(math.floor(lon_center))
+
+        target_tiles = [
+            (c_lat, c_lon),
+            (c_lat + 1, c_lon),
+            (c_lat, c_lon + 1),
+            (c_lat + 1, c_lon + 1),
+        ]
+
+        subset_tiles = [t for t in tiles if t in target_tiles]
+        if not subset_tiles:
+            subset_tiles = [(c_lat, c_lon)]
+
     downloaded_files = []
-    
+
     for lat, lon in subset_tiles:
         tile_name = f"Copernicus_DSM_COG_10_N{lat:02d}_00_E{lon:03d}_00_DEM"
         tile_file = f"{tile_name}.tif"
