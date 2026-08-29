@@ -72,22 +72,55 @@ def get_dem_tiles_for_bbox(bbox: Dict[str, float]) -> list:
             tiles.append((lat, lon))
     return tiles
 
+# Pilot states persist their DEM under a collision-free "<state>_pilot_dem.tif"
+# name (see prepare_<state>_terrain.py), NOT the generic "<clean_state>_dem.tif"
+# that non-pilot states use. Without this map, the DEM lookups below would probe
+# e.g. "arunachal_pradesh_dem.tif" / "assam_dem.tif" / "meghalaya_dem.tif" —
+# files that never exist — and always report DEM Missing for those pilots.
+# Sikkim is intentionally omitted: it keeps the generic "sikkim_dem.tif" name,
+# which acquire_state_dem populates by copying "east_sikkim_dem.tif".
+PILOT_DEM_FILENAMES = {
+    "arunachal pradesh": "arunachal_pilot_dem.tif",
+    "assam": "assam_pilot_dem.tif",
+    "meghalaya": "meghalaya_pilot_dem.tif",
+}
+
+
+def resolve_state_dem_filename(state_name: str) -> str:
+    """
+    Single source of truth for the on-disk DEM basename of a state.
+
+    Arunachal Pradesh / Assam / Meghalaya use their pilot filenames; every other
+    state (including Sikkim) keeps the generic "<clean_state>_dem.tif".
+    """
+    clean_state_name = state_name.lower().replace(' ', '_')
+    return PILOT_DEM_FILENAMES.get(state_name.strip().lower(), f"{clean_state_name}_dem.tif")
+
+
 def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
     """
     State-aware DEM downloader, loader, cache manager, mosaic, and cropper.
     Returns path of the compiled state DEM file.
+
+    The target path uses resolve_state_dem_filename, so the three pilot states
+    reuse their already-prepared "<state>_pilot_dem.tif" instead of downloading
+    a redundant copy. If that file is absent (e.g. a fresh production checkout),
+    the Copernicus tile acquisition path below runs unchanged and writes the
+    mosaic to that same pilot filename. Availability is never assumed.
     """
     import math
     import urllib.request
-    import rasterio
-    from rasterio.merge import merge
-    
+    # NOTE: rasterio is imported lazily further down, immediately before the
+    # mosaic step. The reuse-existing-DEM and tile-download paths need no raster
+    # library, so deferring the import keeps them usable (and unit-testable) in
+    # environments where rasterio is not installed. Behaviour is unchanged: the
+    # mosaic step still requires rasterio and will raise if it is missing.
+
     raw_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw"))
     dem_cache_dir = os.path.join(raw_dir, "dem")
     os.makedirs(dem_cache_dir, exist_ok=True)
-    
-    clean_state_name = state_name.lower().replace(' ', '_')
-    state_dem_path = os.path.join(raw_dir, f"{clean_state_name}_dem.tif")
+
+    state_dem_path = os.path.join(raw_dir, resolve_state_dem_filename(state_name))
     
     # If already compiled and valid, reuse it!
     if os.path.exists(state_dem_path) and os.path.getsize(state_dem_path) > 1000:
@@ -145,6 +178,9 @@ def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
         raise RuntimeError("No DEM tiles could be downloaded or resolved for this state.")
         
     # Merge and clip using rasterio
+    import rasterio
+    from rasterio.merge import merge
+
     src_files = [rasterio.open(fp) for fp in downloaded_files]
     try:
         min_lon = max(state_config["min_lon"], min(src.bounds.left for src in src_files))
@@ -174,17 +210,7 @@ def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
     return state_dem_path
 
 # Pilot states persist their DEM under a collision-free "<state>_pilot_dem.tif"
-# name (see prepare_<state>_terrain.py), NOT the generic "<clean_state>_dem.tif"
-# that non-pilot states use. Without this map, evaluate_terrain_data would look
-# for e.g. "arunachal_pradesh_dem.tif" / "assam_dem.tif" / "meghalaya_dem.tif" —
-# files that never exist — and always report DEM Missing for those pilots.
-# Sikkim is intentionally omitted: it keeps the generic "sikkim_dem.tif" path.
-PILOT_DEM_FILENAMES = {
-    "arunachal pradesh": "arunachal_pilot_dem.tif",
-    "assam": "assam_pilot_dem.tif",
-    "meghalaya": "meghalaya_pilot_dem.tif",
-}
-
+# name (see PILOT_DEM_FILENAMES / resolve_state_dem_filename above).
 def evaluate_terrain_data(state_name: str, state_config: Dict[str, Any]) -> str:
     """
     Checks if raw DEM dataset exists for the state locally.
@@ -194,9 +220,8 @@ def evaluate_terrain_data(state_name: str, state_config: Dict[str, Any]) -> str:
     "<clean_state>_dem.tif". The size guard (>1000 bytes) is preserved so a
     truncated/placeholder file is never reported as Available.
     """
-    clean_state_name = state_name.lower().replace(' ', '_')
-    dem_filename = PILOT_DEM_FILENAMES.get(state_name.strip().lower(), f"{clean_state_name}_dem.tif")
-    dem_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw", dem_filename)
+    dem_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw",
+                            resolve_state_dem_filename(state_name))
 
     if os.path.exists(dem_path) and os.path.getsize(dem_path) > 1000:
         return "Available"

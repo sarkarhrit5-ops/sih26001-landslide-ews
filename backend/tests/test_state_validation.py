@@ -853,3 +853,89 @@ def test_evaluate_terrain_data_size_guard_rejects_tiny_file(monkeypatch):
     assert sv.evaluate_terrain_data("Assam", {}) == "Missing (Requires Download)"
 
 
+# ---------------------------------------------------------------------------
+# Regression: resolve_state_dem_filename is the single source of truth, and
+# acquire_state_dem targets the same filename evaluate_terrain_data probes
+# ---------------------------------------------------------------------------
+# These tests never create, download, or commit a .tif. acquire_state_dem is
+# exercised only along its "already compiled and valid, reuse it" branch, which
+# returns before any network/rasterio work; the download branch is asserted to be
+# *reached* (not executed) by letting the tile loop fail with no config.
+
+def test_resolve_state_dem_filename_all_four_pilots():
+    assert sv.resolve_state_dem_filename("Arunachal Pradesh") == "arunachal_pilot_dem.tif"
+    assert sv.resolve_state_dem_filename("Assam") == "assam_pilot_dem.tif"
+    assert sv.resolve_state_dem_filename("Meghalaya") == "meghalaya_pilot_dem.tif"
+    # Sikkim keeps its pre-existing generic name (populated from east_sikkim_dem.tif)
+    assert sv.resolve_state_dem_filename("Sikkim") == "sikkim_dem.tif"
+
+
+def test_resolve_state_dem_filename_generic_fallback():
+    assert sv.resolve_state_dem_filename("Manipur") == "manipur_dem.tif"
+    assert sv.resolve_state_dem_filename("Nagaland") == "nagaland_dem.tif"
+    # Multi-word non-pilot states still get underscored generic names.
+    assert sv.resolve_state_dem_filename("West Bengal") == "west_bengal_dem.tif"
+
+
+def test_acquire_state_dem_reuses_pilot_file_for_each_pilot(monkeypatch, tmp_path):
+    # For all four pilots, an existing valid DEM under the resolved name is
+    # returned as-is -- no download, no copy, no new .tif.
+    monkeypatch.setattr(sv.os, "makedirs", lambda *a, **k: None)
+    for state, expected in [
+        ("Arunachal Pradesh", "arunachal_pilot_dem.tif"),
+        ("Assam", "assam_pilot_dem.tif"),
+        ("Meghalaya", "meghalaya_pilot_dem.tif"),
+        ("Sikkim", "sikkim_dem.tif"),
+    ]:
+        monkeypatch.setattr(sv.os.path, "exists",
+                            lambda path, exp=expected: os.path.basename(path) == exp)
+        monkeypatch.setattr(sv.os.path, "getsize",
+                            lambda path, exp=expected: 5000 if os.path.basename(path) == exp else 0)
+        returned = sv.acquire_state_dem(state, dict(NER_STATES_CONFIG[state]))
+        assert os.path.basename(returned) == expected
+
+
+def test_acquire_state_dem_target_matches_evaluate_terrain_data(monkeypatch):
+    # The two functions must agree: whatever acquire_state_dem writes is exactly
+    # what evaluate_terrain_data later looks for. Drift between them is the bug
+    # this guards against.
+    for state in ["Arunachal Pradesh", "Assam", "Meghalaya", "Sikkim", "Manipur"]:
+        expected = sv.resolve_state_dem_filename(state)
+        monkeypatch.setattr(sv.os, "makedirs", lambda *a, **k: None)
+        monkeypatch.setattr(sv.os.path, "exists",
+                            lambda path, exp=expected: os.path.basename(path) == exp)
+        monkeypatch.setattr(sv.os.path, "getsize",
+                            lambda path, exp=expected: 5000 if os.path.basename(path) == exp else 0)
+        acquired = os.path.basename(sv.acquire_state_dem(state, dict(NER_STATES_CONFIG[state])))
+        assert acquired == expected
+        assert sv.evaluate_terrain_data(state, {}) == "Available"
+
+
+def test_acquire_state_dem_absent_pilot_falls_through_to_acquisition(monkeypatch):
+    # If the pilot DEM is absent (fresh production checkout), acquire_state_dem
+    # must NOT report success -- it falls through to the Copernicus tile path.
+    # Here every download is made to fail, so the documented RuntimeError proves
+    # the acquisition path was entered rather than availability being assumed.
+    monkeypatch.setattr(sv.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(sv.os.path, "exists", lambda path: False)
+    monkeypatch.setattr(sv.os.path, "getsize", lambda path: 0)
+
+    attempted = []
+
+    class _FailingRetrieve:
+        def urlretrieve(self, url, dest):
+            attempted.append(url)
+            raise OSError("network disabled in unit test")
+
+    import urllib.request as _urllib_request
+    monkeypatch.setattr(_urllib_request, "urlretrieve",
+                        _FailingRetrieve().urlretrieve)
+
+    with pytest.raises(RuntimeError):
+        sv.acquire_state_dem("Meghalaya", dict(NER_STATES_CONFIG["Meghalaya"]))
+    # At least one Copernicus GLO-30 tile URL was attempted.
+    assert attempted
+    assert all("copernicus-dem-30m" in u for u in attempted)
+
+
+
