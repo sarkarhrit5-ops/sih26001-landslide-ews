@@ -173,13 +173,31 @@ def acquire_state_dem(state_name: str, state_config: Dict[str, Any]) -> str:
             
     return state_dem_path
 
+# Pilot states persist their DEM under a collision-free "<state>_pilot_dem.tif"
+# name (see prepare_<state>_terrain.py), NOT the generic "<clean_state>_dem.tif"
+# that non-pilot states use. Without this map, evaluate_terrain_data would look
+# for e.g. "arunachal_pradesh_dem.tif" / "assam_dem.tif" / "meghalaya_dem.tif" —
+# files that never exist — and always report DEM Missing for those pilots.
+# Sikkim is intentionally omitted: it keeps the generic "sikkim_dem.tif" path.
+PILOT_DEM_FILENAMES = {
+    "arunachal pradesh": "arunachal_pilot_dem.tif",
+    "assam": "assam_pilot_dem.tif",
+    "meghalaya": "meghalaya_pilot_dem.tif",
+}
+
 def evaluate_terrain_data(state_name: str, state_config: Dict[str, Any]) -> str:
     """
     Checks if raw DEM dataset exists for the state locally.
+
+    For the Arunachal Pradesh / Assam / Meghalaya pilots the on-disk DEM is
+    named "<state>_pilot_dem.tif"; all other states fall back to the generic
+    "<clean_state>_dem.tif". The size guard (>1000 bytes) is preserved so a
+    truncated/placeholder file is never reported as Available.
     """
     clean_state_name = state_name.lower().replace(' ', '_')
-    dem_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw", f"{clean_state_name}_dem.tif")
-    
+    dem_filename = PILOT_DEM_FILENAMES.get(state_name.strip().lower(), f"{clean_state_name}_dem.tif")
+    dem_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw", dem_filename)
+
     if os.path.exists(dem_path) and os.path.getsize(dem_path) > 1000:
         return "Available"
     return "Missing (Requires Download)"

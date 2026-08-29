@@ -789,3 +789,67 @@ def test_refresh_meghalaya_missing_terrain_is_reported(tmp_path):
     assert rec["model_status"] == "Trained & Validated"
     assert rec["overall_status"] == "VALIDATED_PILOT"
 
+
+# ---------------------------------------------------------------------------
+# Regression: evaluate_terrain_data resolves the correct DEM filename per state
+# ---------------------------------------------------------------------------
+# The pilot DEMs are persisted as "<state>_pilot_dem.tif" (collision-free), while
+# the generic evaluator historically looked for "<clean_state>_dem.tif". These
+# tests pin the filename that gets probed on disk without requiring any real
+# .tif files: os.path.exists / os.path.getsize are stubbed to answer only for the
+# expected basename, so a wrong lookup would report "Missing".
+
+def _terrain_status_for(state_name, expected_basename, monkeypatch):
+    seen = {}
+
+    def fake_exists(path):
+        seen["basename"] = os.path.basename(path)
+        return os.path.basename(path) == expected_basename
+
+    def fake_getsize(path):
+        return 5000 if os.path.basename(path) == expected_basename else 0
+
+    monkeypatch.setattr(sv.os.path, "exists", fake_exists)
+    monkeypatch.setattr(sv.os.path, "getsize", fake_getsize)
+    status = sv.evaluate_terrain_data(state_name, {})
+    return status, seen.get("basename")
+
+
+def test_evaluate_terrain_data_uses_pilot_dem_names(monkeypatch):
+    for state, expected in [
+        ("Arunachal Pradesh", "arunachal_pilot_dem.tif"),
+        ("Assam", "assam_pilot_dem.tif"),
+        ("Meghalaya", "meghalaya_pilot_dem.tif"),
+    ]:
+        status, basename = _terrain_status_for(state, expected, monkeypatch)
+        assert basename == expected
+        assert status == "Available"
+
+
+def test_evaluate_terrain_data_sikkim_keeps_generic_name(monkeypatch):
+    status, basename = _terrain_status_for("Sikkim", "sikkim_dem.tif", monkeypatch)
+    assert basename == "sikkim_dem.tif"
+    assert status == "Available"
+
+
+def test_evaluate_terrain_data_nonpilot_uses_generic_name(monkeypatch):
+    status, basename = _terrain_status_for("Manipur", "manipur_dem.tif", monkeypatch)
+    assert basename == "manipur_dem.tif"
+    assert status == "Available"
+
+
+def test_evaluate_terrain_data_missing_file_is_not_available(monkeypatch):
+    # No file matches -> generic + pilot lookups both fail -> honestly "Missing",
+    # never hard-coded Available.
+    monkeypatch.setattr(sv.os.path, "exists", lambda path: False)
+    monkeypatch.setattr(sv.os.path, "getsize", lambda path: 0)
+    assert sv.evaluate_terrain_data("Meghalaya", {}) == "Missing (Requires Download)"
+
+
+def test_evaluate_terrain_data_size_guard_rejects_tiny_file(monkeypatch):
+    # A present but truncated (<=1000 byte) placeholder must not read as Available.
+    monkeypatch.setattr(sv.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(sv.os.path, "getsize", lambda path: 500)
+    assert sv.evaluate_terrain_data("Assam", {}) == "Missing (Requires Download)"
+
+
