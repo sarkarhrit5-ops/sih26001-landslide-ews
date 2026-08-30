@@ -1069,3 +1069,236 @@ def test_publisher_verify_flags_entries_and_files_that_do_not_correspond(tmp_pat
     ok, rows = publish.verify_manifest(incomplete, items)
     assert ok is False
     assert dict(rows)["sikkim_tpi.tif"] == "local artifact has no manifest entry"
+
+
+# ---------------------------------------------------------------------------
+# THE REAL HTTP PATH IS MEMORY-FLAT
+#
+# The tests above inject a fetcher, so they say nothing about how the SHIPPED
+# _default_fetcher / _default_manifest_loader actually consume a response. That is
+# precisely what OOM-killed a 512 MB Render instance, so it is pinned here directly: a
+# fake "requests" is placed in sys.modules and its response can ONLY be read
+# incrementally -- .content, .text and .read() raise. No credentials, no network, and
+# neither the fake nor the test ever holds the whole body.
+# ---------------------------------------------------------------------------
+
+LARGE_BODY_BYTES = 32 * 1024 * 1024
+
+
+class _StreamOnlyResponse:
+    """A response body that can only be consumed block by block."""
+
+    def __init__(self, total_bytes, watch_path=None, body_blocks=None):
+        self.total_bytes = total_bytes
+        self.watch_path = watch_path
+        self.body_blocks = body_blocks
+        self.chunk_sizes = []
+        self.blocks_yielded = 0
+        self.digest = hashlib.sha256()
+        self.bytes_on_disk_before_last_block = None
+        self.closed = False
+        self.raised_for_status = False
+
+    @property
+    def content(self):
+        raise AssertionError("response.content was read: the whole body was buffered")
+
+    @property
+    def text(self):
+        raise AssertionError("response.text was read: the whole body was buffered")
+
+    def read(self, *_args, **_kwargs):
+        raise AssertionError("response.read() was called: unbounded whole-body read")
+
+    def raise_for_status(self):
+        self.raised_for_status = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.closed = True
+        return False
+
+    def iter_content(self, chunk_size=None):
+        assert chunk_size, "iter_content must be given a bounded block size"
+        self.chunk_sizes.append(chunk_size)
+        if self.body_blocks is not None:
+            for block in self.body_blocks:
+                self.blocks_yielded += 1
+                self.digest.update(block)
+                yield block
+            return
+        # Generated on demand: the payload never exists as one object anywhere.
+        pattern = (b"\xde\xad\xbe\xef" * (chunk_size // 4 + 1))[:chunk_size]
+        remaining = self.total_bytes
+        while remaining > 0:
+            block = pattern if remaining >= chunk_size else pattern[:remaining]
+            remaining -= len(block)
+            self.blocks_yielded += 1
+            self.digest.update(block)
+            if remaining == 0 and self.watch_path is not None:
+                self.bytes_on_disk_before_last_block = (
+                    os.path.getsize(self.watch_path)
+                    if os.path.exists(self.watch_path) else 0)
+            yield block
+
+
+class _FakeRequests:
+    """Stands in for the requests module that _default_* import lazily."""
+
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def get(self, url, stream=False, timeout=None):
+        assert stream is True, "the response must be opened in streaming mode"
+        self.calls.append((url, timeout))
+        return self.response
+
+def test_stream_only_response_guards_are_live():
+    """
+    Test integrity: the .content / .text / .read() guards must really fire, otherwise the
+    fetcher test below would pass by accident rather than by never touching them.
+    """
+    response = _StreamOnlyResponse(16)
+    with pytest.raises(AssertionError):
+        response.content
+    with pytest.raises(AssertionError):
+        response.text
+    with pytest.raises(AssertionError):
+        response.read()
+
+
+def test_default_fetcher_streams_a_large_body_in_bounded_blocks(monkeypatch, tmp_path):
+    """
+    Regression for the 512 MB OOM: a 32 MiB body is consumed block by block straight into
+    <target>.part, with the SHA-256 and the byte count accumulated in flight, and the
+    whole-body accessors never touched.
+    """
+    part = os.path.join(str(tmp_path), "assam_pilot_dem.tif.part")
+    response = _StreamOnlyResponse(LARGE_BODY_BYTES, watch_path=part)
+    fake = _FakeRequests(response)
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    url = "https://cdn.example/pilots/assam_pilot_dem.tif"
+
+    observed = pas._default_fetcher(url, part, 30.0)
+
+    assert fake.calls == [(url, 30.0)]
+    assert response.raised_for_status is True
+    assert response.closed is True
+    # Bounded blocks, small enough that peak memory is independent of artifact size.
+    assert response.chunk_sizes == [pas.DOWNLOAD_CHUNK_BYTES]
+    assert pas.DOWNLOAD_CHUNK_BYTES <= 1024 * 1024
+    assert response.blocks_yielded == LARGE_BODY_BYTES // pas.DOWNLOAD_CHUNK_BYTES
+    # INCREMENTAL: bytes had already reached the disk before the body ran out, which a
+    # single .content read could not produce.
+    assert response.bytes_on_disk_before_last_block >= pas.FLUSH_EVERY_BYTES
+    # Hashed and counted in flight, so verification needs no second pass over the file.
+    assert observed == {"bytes": LARGE_BODY_BYTES, "sha256": response.digest.hexdigest()}
+    assert os.path.getsize(part) == LARGE_BODY_BYTES
+    assert pas.sha256_of_file(part) == observed["sha256"]
+
+
+def test_default_manifest_loader_streams_bounded_blocks(monkeypatch):
+    """The manifest is small, but it is still never read through .content."""
+    payload = {"artifacts": {"sikkim_dem.tif": {"bytes": 4, "sha256": "a" * 64}}}
+    body = json.dumps(payload).encode("utf-8")
+    blocks = [body[i:i + 7] for i in range(0, len(body), 7)]
+    response = _StreamOnlyResponse(len(body), body_blocks=blocks)
+    monkeypatch.setitem(sys.modules, "requests", _FakeRequests(response))
+
+    url = "https://cdn.example/pilots/pilot_manifest.json"
+    assert pas._default_manifest_loader(url, 5.0) == payload
+    assert response.chunk_sizes == [pas.MANIFEST_CHUNK_BYTES]
+    assert response.blocks_yielded == len(blocks)
+    assert response.closed is True
+
+
+def test_default_manifest_loader_refuses_an_oversized_body(monkeypatch):
+    """
+    A wrong URL that answers with something enormous must be refused, not accumulated --
+    the only place this module joins blocks at all.
+    """
+    oversized = pas.MAX_MANIFEST_BYTES + pas.MANIFEST_CHUNK_BYTES
+    response = _StreamOnlyResponse(oversized)
+    monkeypatch.setitem(sys.modules, "requests", _FakeRequests(response))
+
+    with pytest.raises(ValueError):
+        pas._default_manifest_loader("https://cdn.example/pilots/pilot_manifest.json", 5.0)
+    # Stopped at the bound rather than after reading everything on offer.
+    assert response.blocks_yielded <= (pas.MAX_MANIFEST_BYTES // pas.MANIFEST_CHUNK_BYTES) + 1
+    assert response.blocks_yielded * pas.MANIFEST_CHUNK_BYTES <= \
+        pas.MAX_MANIFEST_BYTES + pas.MANIFEST_CHUNK_BYTES
+
+
+def test_observed_from_fetch_normalises_what_a_fetcher_may_return():
+    digest = "b" * 64
+    assert pas._observed_from_fetch({"bytes": 12, "sha256": digest.upper()}) == (12, digest)
+    assert pas._observed_from_fetch({"bytes": "12", "sha256": digest}) == (12, digest)
+    # A malformed digest is not trusted; verification re-reads the file instead.
+    assert pas._observed_from_fetch({"bytes": 12, "sha256": "abc"}) == (12, None)
+    assert pas._observed_from_fetch({"bytes": None, "sha256": digest}) == (None, digest)
+    # The historical contract -- a bare byte count -- still works unchanged.
+    assert pas._observed_from_fetch(9) == (9, None)
+    assert pas._observed_from_fetch(None) == (None, None)
+    assert pas._observed_from_fetch("nonsense") == (None, None)
+
+
+def test_verify_streamed_uses_the_in_flight_digest_and_catches_short_writes(tmp_path):
+    body = b"terrain-bytes" * 11
+    path = os.path.join(str(tmp_path), "artifact.tif")
+    _write(path, body)
+    entry = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+
+    assert pas.verify_streamed(path, entry, len(body), entry["sha256"]) is None
+    assert "sha256 mismatch" in pas.verify_streamed(path, entry, len(body), "c" * 64)
+    # More bytes were streamed than reached the disk: the file is short.
+    assert "short write" in pas.verify_streamed(path, entry, len(body) + 5,
+                                                entry["sha256"])
+    bigger = {"bytes": len(body) + 1, "sha256": entry["sha256"]}
+    assert "size mismatch" in pas.verify_streamed(path, bigger, len(body),
+                                                  entry["sha256"])
+    absent = os.path.join(str(tmp_path), "absent.tif")
+    assert pas.verify_streamed(absent, entry, 0, entry["sha256"]) == \
+        "file was not written"
+
+
+def test_verify_streamed_falls_back_to_verify_artifact_without_a_digest(monkeypatch,
+                                                                       tmp_path):
+    """
+    An injected fetcher that returns only a byte count (as every test above does, and as
+    the pre-change contract allowed) still goes through the unchanged full-read check.
+    """
+    body = b"x" * 40
+    path = os.path.join(str(tmp_path), "artifact.tif")
+    _write(path, body)
+    entry = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    calls = []
+    real = pas.verify_artifact
+
+    def spy(candidate, manifest_entry):
+        calls.append(candidate)
+        return real(candidate, manifest_entry)
+
+    monkeypatch.setattr(pas, "verify_artifact", spy)
+    assert pas.verify_streamed(path, entry, len(body), None) is None
+    assert calls == [path]
+
+
+def test_no_whole_body_read_survives_in_the_source():
+    """
+    Static guard: response.content, response.text, response.read() or an unbounded
+    iter_content() would each buffer a 184 MB raster whole. None may reappear.
+    """
+    with open(pas.__file__, "r", encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                and node.value.id == "response":
+            assert node.attr in ("raise_for_status", "iter_content"), \
+                "response.%s reintroduces a whole-body read" % node.attr
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "iter_content":
+            assert [kw.arg for kw in node.keywords] == ["chunk_size"], \
+                "iter_content must always be given a bounded chunk_size"

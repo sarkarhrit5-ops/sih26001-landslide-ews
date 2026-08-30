@@ -79,6 +79,16 @@ IDEMPOTENCE
     before the manifest is even fetched: zero network I/O. With a cache directory, a
     cached file that still matches the manifest is re-linked without re-downloading.
 
+MEMORY (the instance has 512 MB; the dataset is 2.2 GB)
+    Nothing is ever held whole. Response bodies are consumed with iter_content in
+    DOWNLOAD_CHUNK_BYTES blocks written straight to the ".part" file, with the SHA-256 and
+    the byte count accumulated in flight -- so verification needs no second pass over the
+    file, and response.content / .text / unbounded read() are never used. Written bytes
+    are fsync'd and dropped from the page cache every FLUSH_EVERY_BYTES, because dirty
+    page cache counts against a container memory limit even when process RSS is flat. The
+    manifest is a small JSON document and is refused past MAX_MANIFEST_BYTES rather than
+    accumulated. No raster is opened -- rasterio is never imported here.
+
 ENVIRONMENT (all configuration, no code changes needed to deploy)
     SIH_PILOT_ARTIFACT_BASE_URL   master switch. Unset/blank => mechanism disabled.
                                   Public-read HTTPS prefix; filenames are appended.
@@ -135,8 +145,17 @@ SIKKIM_DERIVATIVE_FEATURES = ("slope", "aspect", "roughness", "tpi")
 DEFAULT_MANIFEST_NAME = "pilot_manifest.json"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_TOTAL_MB = 2600
-# Streamed in fixed-size blocks so peak memory is independent of artifact size.
-DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+# Streamed in fixed-size blocks so peak memory is independent of artifact size. Small on
+# purpose: the instance this runs on has 512 MB, and the largest raster is 184 MB.
+DOWNLOAD_CHUNK_BYTES = 256 * 1024
+# Written bytes are flushed and dropped from the page cache this often. Dirty page cache
+# counts against a container memory limit, so streaming 2.2 GB without this can walk the
+# cgroup into an OOM kill even while the process itself holds one small buffer.
+FLUSH_EVERY_BYTES = 8 * 1024 * 1024
+# The manifest is a small JSON document; anything larger is not ours and is refused
+# rather than accumulated.
+MANIFEST_CHUNK_BYTES = 64 * 1024
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 
 _TRUE_VALUES = ("1", "true", "yes", "on")
 _FALSE_VALUES = ("0", "false", "no", "off", "")
@@ -399,24 +418,69 @@ def normalize_manifest(payload):
 
 
 def _default_manifest_loader(url, timeout):
-    """Real manifest fetch. requests is already a backend dependency; boto3 is not."""
+    """
+    Real manifest fetch, read in bounded blocks.
+
+    Small as this document is (20 entries), it is fetched under the same discipline as the
+    rasters: never response.content, never response.text, never an unbounded read(). A
+    body over MAX_MANIFEST_BYTES is refused instead of buffered -- that is not our
+    manifest, and accumulating it would be the exact failure this module exists to avoid.
+    """
     import json
     import requests
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    return json.loads(response.content.decode("utf-8"))
+    blocks = []
+    total = 0
+    with requests.get(url, stream=True, timeout=timeout) as response:
+        response.raise_for_status()
+        for chunk in response.iter_content(chunk_size=MANIFEST_CHUNK_BYTES):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > MAX_MANIFEST_BYTES:
+                raise ValueError("manifest body exceeds %d bytes; refusing to buffer it"
+                                 % MAX_MANIFEST_BYTES)
+            blocks.append(chunk)
+    return json.loads(b"".join(blocks).decode("utf-8"))
+
+
+def _flush_and_release(handle, offset, length):
+    """
+    Push a written block to disk and ask the kernel to drop it from the page cache.
+
+    Best-effort by design: on a platform without posix_fadvise this degrades to a plain
+    flush, which still bounds the dirty-page total. A failure here must never fail a
+    download -- the bytes are already correct on disk.
+    """
+    handle.flush()
+    if length <= 0:
+        return
+    try:
+        fileno = handle.fileno()
+        os.fsync(fileno)
+        if hasattr(os, "posix_fadvise"):
+            os.posix_fadvise(fileno, offset, length, os.POSIX_FADV_DONTNEED)
+    except (OSError, ValueError, AttributeError):  # pragma: no cover - platform dependent
+        logger.debug("[pilot-artifacts] could not release page cache for a written block.")
 
 
 def _default_fetcher(url, dest_path, timeout):
     """
-    Real object fetch: stream the body to dest_path in fixed-size blocks and return the
-    number of bytes written.
+    Real object fetch: stream the body to dest_path in small fixed-size blocks, hashing as
+    it goes, and return {"bytes": int, "sha256": str}.
 
-    Peak memory is one DOWNLOAD_CHUNK_BYTES buffer regardless of artifact size, which is
-    the whole point of this module -- the regeneration path OOM-killed the instance.
+    Peak RSS is ONE DOWNLOAD_CHUNK_BYTES buffer regardless of artifact size. No whole-file
+    bytes object exists anywhere on this path -- response.content, response.text or an
+    unbounded read() would each materialise up to 184 MB, which a 512 MB instance cannot
+    afford on top of the loaded application.
+
+    The digest is computed from the chunks in flight, so the finished artifact never has
+    to be read back a second time merely to hash it, and each block is flushed and
+    released from the page cache so the cgroup's memory total stays flat across 2.2 GB.
     """
     import requests
+    digest = hashlib.sha256()
     written = 0
+    pending = 0
     with requests.get(url, stream=True, timeout=timeout) as response:
         response.raise_for_status()
         with open(dest_path, "wb") as handle:
@@ -424,20 +488,63 @@ def _default_fetcher(url, dest_path, timeout):
                 if not chunk:
                     continue
                 handle.write(chunk)
+                digest.update(chunk)
                 written += len(chunk)
-    return written
+                pending += len(chunk)
+                # Drop the reference before asking for the next block, so at most one
+                # chunk is alive at a time.
+                del chunk
+                if pending >= FLUSH_EVERY_BYTES:
+                    _flush_and_release(handle, written - pending, pending)
+                    pending = 0
+            _flush_and_release(handle, written - pending, pending)
+    return {"bytes": written, "sha256": digest.hexdigest()}
 
 
 def sha256_of_file(path, chunk_bytes=DOWNLOAD_CHUNK_BYTES):
     """SHA-256 of a file, read incrementally (never loads the raster into memory)."""
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
+        offset = 0
         while True:
             block = handle.read(chunk_bytes)
             if not block:
                 break
             digest.update(block)
+            read = len(block)
+            del block
+            # Hashing a cached 184 MB raster would otherwise pull all of it into the page
+            # cache, which counts against the container limit.
+            try:
+                if hasattr(os, "posix_fadvise"):
+                    os.posix_fadvise(handle.fileno(), offset, read,
+                                     os.POSIX_FADV_DONTNEED)
+            except (OSError, ValueError):  # pragma: no cover - platform dependent
+                pass
+            offset += read
     return digest.hexdigest()
+
+
+def _observed_from_fetch(result):
+    """
+    Normalise what a fetcher reported: (bytes or None, sha256 or None).
+
+    A fetcher may return a mapping carrying "bytes"/"sha256" (the streaming default, so
+    the artifact never has to be re-read to be hashed), a plain int of bytes written, or
+    nothing at all. Anything without a usable 64-hex digest falls back to hashing the
+    file on disk -- the same check by a slower route, never a weaker one.
+    """
+    if isinstance(result, dict):
+        digest = str(result.get("sha256", "")).strip().lower()
+        try:
+            size = int(result.get("bytes"))
+        except (TypeError, ValueError):
+            size = None
+        return size, (digest if len(digest) == 64 else None)
+    try:
+        return int(result), None
+    except (TypeError, ValueError):
+        return None, None
 
 
 def verify_artifact(path, entry):
@@ -456,6 +563,32 @@ def verify_artifact(path, entry):
     actual_digest = sha256_of_file(path)
     if actual_digest != entry["sha256"]:
         return "sha256 mismatch: got %s, manifest says %s" % (actual_digest,
+                                                             entry["sha256"])
+    return None
+
+
+def verify_streamed(path, entry, observed_bytes=None, observed_digest=None):
+    """
+    Same contract as verify_artifact -- None when path matches the manifest entry, else a
+    reason -- but able to use a digest computed during the download.
+
+    The on-disk size is ALWAYS re-measured, so a short write cannot pass on the strength
+    of a byte count the fetcher merely claimed. With no observed digest this is exactly
+    verify_artifact, which is what keeps injected test fetchers on the identical path.
+    """
+    if observed_digest is None:
+        return verify_artifact(path, entry)
+    if not os.path.exists(path):
+        return "file was not written"
+    actual_size = os.path.getsize(path)
+    if observed_bytes is not None and actual_size != observed_bytes:
+        return "short write: %d bytes on disk, %d streamed" % (actual_size,
+                                                              observed_bytes)
+    if actual_size != entry["bytes"]:
+        return "size mismatch: got %d bytes, manifest says %d" % (actual_size,
+                                                                 entry["bytes"])
+    if observed_digest != entry["sha256"]:
+        return "sha256 mismatch: got %s, manifest says %s" % (observed_digest,
                                                              entry["sha256"])
     return None
 
@@ -572,8 +705,9 @@ def _fetch_one(base_url, cache_dir, final_path, entry, fetcher, timeout, aliases
     url = artifact_url(base_url, filename)
     logger.debug("[pilot-artifacts] %s: GET %s", filename, url)
     try:
-        fetcher(url, part, timeout)
-        reason = verify_artifact(part, entry)
+        observed = fetcher(url, part, timeout)
+        observed_bytes, observed_digest = _observed_from_fetch(observed)
+        reason = verify_streamed(part, entry, observed_bytes, observed_digest)
         if reason is not None:
             raise RuntimeError("%s failed verification: %s" % (filename, reason))
         size = os.path.getsize(part)
