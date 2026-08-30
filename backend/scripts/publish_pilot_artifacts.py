@@ -26,11 +26,16 @@ USAGE
     cd backend
     python scripts/publish_pilot_artifacts.py --manifest pilot_manifest.json
     python scripts/publish_pilot_artifacts.py --manifest pilot_manifest.json --verify
-    python scripts/publish_pilot_artifacts.py --manifest /tmp/manifest.json --uploader aws \
+    python scripts/publish_pilot_artifacts.py --manifest pilot_manifest.json --uploader aws \
         --destination s3://my-bucket/pilots
 
 --verify re-reads an existing manifest and re-checks every entry against the local file
 (size AND SHA-256) without rewriting anything; exit 0 only when all entries match.
+
+Upload the manifest under the SAME basename the runtime asks for --
+pilot_artifact_store.DEFAULT_MANIFEST_NAME, i.e. "pilot_manifest.json". Publishing it as
+"manifest.json" makes every artifact fail with manifest_unavailable unless
+SIH_PILOT_ARTIFACT_MANIFEST is set to match.
 
 Then upload the 20 rasters plus the manifest to the same prefix, make them public-read,
 and set on the deployment:

@@ -83,7 +83,8 @@ ENVIRONMENT (all configuration, no code changes needed to deploy)
     SIH_PILOT_ARTIFACT_BASE_URL   master switch. Unset/blank => mechanism disabled.
                                   Public-read HTTPS prefix; filenames are appended.
     SIH_PILOT_ARTIFACT_MANIFEST   manifest filename resolved against the base URL, or an
-                                  absolute http(s) URL. Default "manifest.json".
+                                  absolute http(s) URL. Default "pilot_manifest.json",
+                                  which is the name the publisher writes and uploads.
     SIH_PILOT_ARTIFACT_STATES     comma-separated subset, for staging one pilot at a
                                   time. Default "Assam,Arunachal Pradesh,Meghalaya,
                                   Sikkim".
@@ -127,7 +128,11 @@ SIKKIM_DEM_FILENAME = "sikkim_dem.tif"
 SIKKIM_DERIVATIVE_PREFIX = "sikkim_"
 SIKKIM_DERIVATIVE_FEATURES = ("slope", "aspect", "roughness", "tpi")
 
-DEFAULT_MANIFEST_NAME = "manifest.json"
+# The name the publisher (scripts/publish_pilot_artifacts.py) actually writes and that
+# was uploaded alongside the rasters. A bare "manifest.json" default made a fresh
+# deployment request an object that does not exist in the store, so every artifact was
+# refused with manifest_unavailable. Overridable via SIH_PILOT_ARTIFACT_MANIFEST.
+DEFAULT_MANIFEST_NAME = "pilot_manifest.json"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_TOTAL_MB = 2600
 # Streamed in fixed-size blocks so peak memory is independent of artifact size.

@@ -228,12 +228,51 @@ def test_base_url_is_never_hard_coded(raw, expected):
 
 def test_manifest_url_defaults_resolves_and_accepts_absolute():
     base = {"SIH_PILOT_ARTIFACT_BASE_URL": "https://cdn.example/pilots/"}
-    assert pas.manifest_url(base) == "https://cdn.example/pilots/manifest.json"
+    assert pas.manifest_url(base) == "https://cdn.example/pilots/pilot_manifest.json"
     named = dict(base, SIH_PILOT_ARTIFACT_MANIFEST="v2/terrain.json")
     assert pas.manifest_url(named) == "https://cdn.example/pilots/v2/terrain.json"
     absolute = dict(base, SIH_PILOT_ARTIFACT_MANIFEST="https://other.example/m.json")
     assert pas.manifest_url(absolute) == "https://other.example/m.json"
     assert pas.manifest_url({}) is None
+
+
+def test_default_manifest_name_matches_the_published_object():
+    """
+    Regression: the default was "manifest.json" while the publisher writes -- and the
+    Hugging Face dataset holds -- "pilot_manifest.json". A fresh deployment therefore
+    requested an object that does not exist and refused every artifact with
+    manifest_unavailable. The default must be the name that was actually uploaded.
+    """
+    assert pas.DEFAULT_MANIFEST_NAME == "pilot_manifest.json"
+    # The exact URL a deployment with only the base URL set will request.
+    env = {"SIH_PILOT_ARTIFACT_BASE_URL":
+           "https://huggingface.co/datasets/USICT-LazyCoders-ai/sih26001-terrain/"
+           "resolve/main"}
+    assert pas.manifest_url(env) == (
+        "https://huggingface.co/datasets/USICT-LazyCoders-ai/sih26001-terrain/"
+        "resolve/main/pilot_manifest.json")
+    # The base URL itself is untouched by the manifest name, and object URLs keep using
+    # the raster basenames -- this fix must not move any artifact.
+    assert pas.artifact_base_url(env) == env["SIH_PILOT_ARTIFACT_BASE_URL"]
+    assert pas.artifact_url(pas.artifact_base_url(env), "sikkim_dem.tif") == (
+        "https://huggingface.co/datasets/USICT-LazyCoders-ai/sih26001-terrain/"
+        "resolve/main/sikkim_dem.tif")
+    # An explicit override still wins, so a differently named store needs no code change.
+    assert pas.manifest_url(dict(env, SIH_PILOT_ARTIFACT_MANIFEST="manifest.json")) == (
+        "https://huggingface.co/datasets/USICT-LazyCoders-ai/sih26001-terrain/"
+        "resolve/main/manifest.json")
+
+
+def test_a_run_requests_the_default_manifest_name(monkeypatch, tmp_path):
+    """The URL the loader is handed during a real run, not just what manifest_url says."""
+    root, _pilots, store = _wire(monkeypatch, tmp_path, ["Assam"])
+    report = _run(root, ["Assam"], store)
+    assert store.manifest_loads == ["https://cdn.example/pilots/pilot_manifest.json"]
+    # Behaviour unchanged: the objects themselves are still fetched by raster basename.
+    assert sorted(url.rsplit("/", 1)[-1] for url in store.gets) == [
+        "assam_pilot_aspect.tif", "assam_pilot_dem.tif", "assam_pilot_roughness.tif",
+        "assam_pilot_slope.tif", "assam_pilot_tpi.tif"]
+    assert report["failed"] == 0
 
 
 def test_artifact_url_joins_without_double_slash():
@@ -409,7 +448,7 @@ def test_full_fetch_writes_verified_bytes_to_the_canonical_paths(monkeypatch, tm
         with open(path, "rb") as handle:
             assert handle.read() == store.payloads[os.path.basename(path)]
     assert report["bytes"] == sum(len(b) for b in store.payloads.values())
-    assert store.manifest_loads == ["%s/manifest.json" % BASE]
+    assert store.manifest_loads == ["%s/pilot_manifest.json" % BASE]
 
 
 def test_state_specific_selection_leaves_other_pilots_alone(monkeypatch, tmp_path):
