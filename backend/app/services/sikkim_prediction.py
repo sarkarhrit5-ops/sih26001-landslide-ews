@@ -32,7 +32,7 @@ pipeline is exercised offline by injecting fake `model_evidence`,
 """
 
 import math
-from datetime import date as _date_cls, datetime, timedelta
+from datetime import date as _date_cls, datetime
 
 from app.core.config_states import get_pilot_aoi_bounds
 from app.services import risk_inputs
@@ -279,65 +279,62 @@ def _derive_rainfall_features(daily):
     }
 
 
+_UNMATCHED_AOI_LABEL = "UNMATCHED_PILOT_AOI"
+
+
+def _state_for_bounds(bounds):
+    """
+    Label a rainfall read with the pilot state whose canonical AOI these bounds
+    ARE. The bbox itself (not this label) is what keys the rainfall cache, so a
+    caller passing a custom bbox is labelled honestly instead of being
+    mis-attributed to a state whose AOI it does not match.
+    """
+    from app.core.config_states import PILOT_AOIS, get_pilot_aoi_bounds
+
+    try:
+        probe = {k: float(bounds[k]) for k in ("min_lat", "max_lat", "min_lon", "max_lon")}
+    except (KeyError, TypeError, ValueError):
+        return _UNMATCHED_AOI_LABEL
+    for name in PILOT_AOIS:
+        canonical = get_pilot_aoi_bounds(name)
+        if all(abs(probe[k] - canonical[k]) <= 1e-9 for k in canonical):
+            return name
+    return _UNMATCHED_AOI_LABEL
+
+
 def _default_rainfall_provider(bounds, target_date, run_type="Early", session=None):
     """
-    Derives the model's five antecedent-rainfall features from REAL IMERG daily
-    means over the pilot AOI.
+    Derives the model's five antecedent-rainfall features for the AOI, delegating
+    the acquisition to app.services.rainfall_service.
 
-    If the requested target date is too recent for the selected IMERG run,
-    search backward for the latest available observation. No synthetic values,
-    zero-filling, or duplicated rainfall days are allowed.
+    Behaviour preserved: same name, same signature, same returned keys, same
+    injected-`session` support, still strictly antecedent (T-1..T-14 with the
+    event day excluded), still no synthetic values, zero-filling or duplicated
+    days, and an unobtainable window still raises PredictionUnavailable.
+
+    What the delegation adds: a 30-minute per-AOI cache (so one grid request no
+    longer issues 15-44 sequential OPeNDAP GETs, and repeat requests issue none),
+    the probe observation reused as day T-1 instead of being discarded, a bounded
+    probe/wall-clock budget, and an explicitly labelled Open-Meteo ERA5 fallback
+    when IMERG is unavailable. A fallback is stamped data_quality_status=FALLBACK
+    and is never presented as an official live IMERG observation.
     """
-    from app.services import weather_ingestion
+    from app.services import rainfall_service
 
-    sess = session if session is not None else weather_ingestion.get_earthdata_session()
-
-    # Find the latest available IMERG observation before the target date.
-    latest_date = None
-    max_probe_days = 30
-
-    for offset in range(1, max_probe_days + 1):
-        candidate = target_date - timedelta(days=offset)
-        try:
-            weather_ingestion._fetch_imerg_day(
-                sess, candidate, bounds, run_type
-            )
-            latest_date = candidate
-            break
-        except Exception as exc:
-            # Only continue searching for unavailable granules.
-            if "404" not in str(exc):
-                raise
-
-    if latest_date is None:
-        raise PredictionUnavailable(
-            "No available IMERG %s observation found within %d days before %s."
-            % (run_type, max_probe_days, target_date.date())
-        )
-
-    # Fetch a consecutive 14-day antecedent window ending at the
-    # latest available observation. Never duplicate a day.
-    daily = []
-    for k in range(RAINFALL_WINDOW_DAYS):
-        day = latest_date - timedelta(days=k)
-        daily.append(
-            float(
-                weather_ingestion._fetch_imerg_day(
-                    sess, day, bounds, run_type
-                )
-            )
-        )
-
-    return {
-        "source": "IMERG_%s" % run_type,
-        "run_type": run_type,
-        "aoi_uniform": True,
-        "window_days": RAINFALL_WINDOW_DAYS,
-        "requested_date": target_date.strftime("%Y-%m-%d"),
-        "rainfall_observation_date": latest_date.strftime("%Y-%m-%d"),
-        "daily_series_mm": [round(v, 4) for v in daily],
-        "features": _derive_rainfall_features(daily),
-    }
+    record = rainfall_service.get_state_rainfall(
+        _state_for_bounds(bounds),
+        target_date=target_date,
+        run_type=run_type,
+        window_days=RAINFALL_WINDOW_DAYS,
+        bounds=bounds,
+        # Preserve dependency injection: an injected session is still the session
+        # used, and is still only created lazily when none was supplied.
+        session_factory=(lambda: session) if session is not None else None,
+    )
+    try:
+        return rainfall_service.to_provider_payload(record)
+    except rainfall_service.RainfallUnavailable as exc:
+        raise PredictionUnavailable(str(exc), details=exc.details)
 
 
 # ---------------------------------------------------------------------------
@@ -433,19 +430,69 @@ def _model_report(evidence):
     return report
 
 
+_LEGACY_RAINFALL_NOTE = (
+    "Antecedent-only (T-1..T-14, event day excluded). One AOI-mean IMERG "
+    "series applied uniformly to all cells."
+)
+
+# Additive provenance/freshness fields produced by app.services.rainfall_service.
+# Copied through ONLY when the provider supplied them, so an injected test/legacy
+# provider that predates these fields still yields a valid report.
+_RAINFALL_PROVENANCE_KEYS = (
+    "requested_date",
+    "rainfall_observation_date",
+    "source_kind",
+    "is_fallback",
+    "data_quality_status",
+    "units",
+    "fetched_at_utc",
+    "freshness",
+    "coverage",
+    "caveats",
+)
+
+
+def _rainfall_note(rainfall):
+    """
+    A note that describes the series that was ACTUALLY used. The legacy sentence
+    named IMERG unconditionally, which would mislabel an Open-Meteo fallback as an
+    official IMERG observation; when provenance is present the source and quality
+    status are stated instead of assumed.
+    """
+    if "source_kind" not in rainfall and "data_quality_status" not in rainfall:
+        return _LEGACY_RAINFALL_NOTE
+    source = rainfall.get("source") or rainfall.get("source_kind") or "unknown source"
+    status = rainfall.get("data_quality_status") or "UNKNOWN"
+    note = (
+        "Antecedent-only (T-1..T-%d, event day excluded). One AOI-mean series from "
+        "%s (data_quality_status=%s) applied uniformly to all cells."
+        % (rainfall.get("window_days", RAINFALL_WINDOW_DAYS), source, status)
+    )
+    if rainfall.get("is_fallback"):
+        note += (
+            " This is a FALLBACK reanalysis series, NOT an official live IMERG "
+            "observation."
+        )
+    extra = rainfall.get("note")
+    if extra:
+        note += " " + str(extra)
+    return note
+
+
 def _rainfall_report(rainfall):
-    return {
+    report = {
         "source": rainfall.get("source"),
         "run_type": rainfall.get("run_type"),
         "aoi_uniform": rainfall.get("aoi_uniform", True),
         "window_days": rainfall.get("window_days", RAINFALL_WINDOW_DAYS),
         "daily_series_mm": rainfall.get("daily_series_mm"),
         "features": {k: round(float(rainfall["features"][k]), 4) for k in RAINFALL_FEATURES},
-        "note": (
-            "Antecedent-only (T-1..T-14, event day excluded). One AOI-mean IMERG "
-            "series applied uniformly to all cells."
-        ),
+        "note": _rainfall_note(rainfall),
     }
+    for key in _RAINFALL_PROVENANCE_KEYS:
+        if key in rainfall:
+            report[key] = rainfall[key]
+    return report
 
 
 def _disclosures():

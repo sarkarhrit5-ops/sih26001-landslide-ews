@@ -591,55 +591,110 @@ def resolve_susceptibility(lat, lon, data_dir=None, artifact_dir=None,
 # ---------------------------------------------------------------------------
 def resolve_current_rainfall(lat, lon, target_date=None,
                              run_type=DEFAULT_IMERG_RUN_TYPE,
-                             half_width_deg=POINT_BBOX_HALF_WIDTH_DEG):
+                             half_width_deg=POINT_BBOX_HALF_WIDTH_DEG,
+                             state_name=DEFAULT_STATE_NAME):
     """
-    Observed 24 h rainfall at a point from NASA GPM IMERG.
+    Observed 24 h rainfall at a point, acquired through
+    app.services.rainfall_service so /risk/current shares one cached read with the
+    grid prediction path instead of issuing its own uncached IMERG fetch.
 
-    Requires Earthdata credentials and network access; when either is absent the
-    input is UNAVAILABLE. The previous serving path used the literal 55.0 mm here,
-    which is above the pilot's 24 h critical accumulation and therefore
-    manufactured a trigger exceedance on every request.
+    Statuses:
+      * NASA GPM IMERG            -> STATUS_REAL
+      * Open-Meteo ERA5 fallback  -> STATUS_DERIVED_PROXY (explicitly labelled a
+        fallback; resolve_risk_inputs then reports has_real_rainfall=False, which
+        degrades the fusion confidence -- a reanalysis product is not a live
+        satellite observation)
+      * neither source available  -> STATUS_UNAVAILABLE, value None
+
+    No value is ever substituted, zero-filled or imputed. The previous serving
+    path used the literal 55.0 mm here, which is above the pilot's 24 h critical
+    accumulation and therefore manufactured a trigger exceedance on every request.
     """
     name = INPUT_CURRENT_RAINFALL
     try:
-        from app.services.weather_ingestion import fetch_imerg_precipitation
+        from app.services import rainfall_service
     except ImportError as exc:
         return _unavailable(name, [
-            "The IMERG client could not be imported (%s); its dependencies "
+            "The rainfall service could not be imported (%s); its dependencies "
             "(requests, xarray, h5netcdf) are not installed." % exc
         ])
 
-    if target_date is None:
-        target_date = datetime.now(timezone.utc) - timedelta(days=IMERG_LATENCY_DAYS)
     bounds = point_bounding_box(lat, lon, half_width_deg)
 
+    # The service window is strictly antecedent (T-1..T-14 of the date it is
+    # given), so asking for `date + IMERG_LATENCY_DAYS` makes its day T-1 the day
+    # this function has always reported. Default behaviour is therefore unchanged:
+    # the latest available observation at or before yesterday.
+    if target_date is None:
+        requested = datetime.now(timezone.utc) - timedelta(days=IMERG_LATENCY_DAYS)
+    else:
+        requested = target_date
     try:
-        result = fetch_imerg_precipitation(
-            bounds, target_date, run_type=run_type, windows=[1]
-        )
-    except Exception as exc:
+        requested = rainfall_service._as_datetime(requested)
+    except (TypeError, ValueError) as exc:
         return _unavailable(name, [
-            "IMERG rainfall could not be retrieved for %s: %s: %s"
-            % (target_date.strftime("%Y-%m-%d"), type(exc).__name__, exc)
+            "target_date %r is not a usable date: %s" % (target_date, exc)
+        ], details={"bounds": bounds})
+    service_date = requested + timedelta(days=IMERG_LATENCY_DAYS)
+
+    try:
+        record = rainfall_service.get_state_rainfall(
+            state_name, target_date=service_date, run_type=run_type, bounds=bounds,
+        )
+    except Exception as exc:  # noqa: BLE001 - a caller error is still surfaced, not hidden
+        return _unavailable(name, [
+            "Rainfall could not be resolved for %s: %s: %s"
+            % (requested.strftime("%Y-%m-%d"), type(exc).__name__, exc)
         ], details={"bounds": bounds})
 
-    accumulation = _finite_number(
-        (result or {}).get("accumulations", {}).get("accumulation_1d_mm")
-    )
-    if accumulation is None or accumulation < 0.0:
+    quality = record.get("data_quality_status")
+    features = record.get("features") or {}
+    accumulation = _finite_number(features.get("rain_1d"))
+    details = {
+        "bounds": bounds,
+        "target_date": (record.get("timestamp") or {}).get("rainfall_observation_date"),
+        "requested_date": (record.get("timestamp") or {}).get("requested_date"),
+        "window_hours": CURRENT_RAINFALL_WINDOW_HOURS,
+        # Provenance/freshness, so a client can see WHICH product answered and how
+        # old the answer is rather than inferring it.
+        "data_quality_status": quality,
+        "source_kind": record.get("source_kind"),
+        "is_fallback": bool(record.get("is_fallback")),
+        "units": record.get("units"),
+        "fetched_at_utc": (record.get("timestamp") or {}).get("fetched_at_utc"),
+        "freshness": record.get("freshness"),
+        "attempts": record.get("attempts"),
+        "caveats": record.get("caveats") or [],
+    }
+
+    if not record.get("usable") or accumulation is None or accumulation < 0.0:
         return _unavailable(name, [
-            "IMERG returned no usable 1-day accumulation for %s (payload: %r)."
-            % (target_date.strftime("%Y-%m-%d"), result)
-        ], details={"bounds": bounds})
+            record.get("unavailable_reason")
+            or ("the rainfall service returned no usable 24 h accumulation for %s"
+                % requested.strftime("%Y-%m-%d"))
+        ], details=details)
+
+    if quality == rainfall_service.QUALITY_FALLBACK:
+        return input_record(
+            name, STATUS_DERIVED_PROXY, value=accumulation,
+            source=record.get("source") or rainfall_service.FALLBACK_SOURCE_LABEL,
+            reasons=list(record.get("caveats") or []) or [
+                "FALLBACK SOURCE: NASA GPM IMERG was unavailable, so this "
+                "accumulation comes from the Open-Meteo ERA5 archive. It is not an "
+                "official live satellite observation."
+            ],
+            details=details,
+        )
+    if quality != rainfall_service.QUALITY_REAL:
+        return _unavailable(name, [
+            "the rainfall service reported data_quality_status=%r, which is not a "
+            "usable observation" % (quality,)
+        ], details=details)
 
     return input_record(
         name, STATUS_REAL, value=accumulation,
-        source=(result or {}).get("source") or ("IMERG_%s" % run_type),
-        details={
-            "bounds": bounds,
-            "target_date": (result or {}).get("target_date"),
-            "window_hours": CURRENT_RAINFALL_WINDOW_HOURS,
-        },
+        source=record.get("source") or ("IMERG_%s" % run_type),
+        details=details,
     )
 
 
@@ -757,8 +812,11 @@ def resolve_risk_inputs(lat, lon, mode=RISK_MODE_CURRENT, data_dir=None,
         "usable": not blocking,
         # Truthful flags for dynamic_risk_module's confidence calculation.
         "has_real_dem": terrain["status"] in USABLE_STATUSES,
+        # STATUS_REAL only: a DERIVED_PROXY (Open-Meteo ERA5 fallback) accumulation
+        # is usable for decision support but is NOT a live satellite observation,
+        # so it must degrade the fusion confidence rather than inflate it.
         "has_real_rainfall": (
-            inputs[INPUT_CURRENT_RAINFALL]["status"] in USABLE_STATUSES
+            inputs[INPUT_CURRENT_RAINFALL]["status"] == STATUS_REAL
         ),
     }
 

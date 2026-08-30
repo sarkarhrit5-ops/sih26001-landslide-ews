@@ -11,6 +11,13 @@ none measured -- while asserting `has_real_dem=True, has_real_rainfall=True`, so
 every response claimed HIGH confidence. They now resolve each input through
 app.services.risk_inputs and return HTTP 503 with a structured
 DATA_UNAVAILABLE body when any required measurement is absent.
+
+`/risk/current` additionally has a PILOT POINT path (app.services.
+pilot_point_prediction): inside one of the four canonical pilot AOIs it reports the
+persisted pilot model's RAINFALL-CONDITIONED hazard probability, explicitly labelled,
+with Option-C fusion reported as NOT applied and the gate's reason -- because those
+models are rainfall-coupled and feeding their output into dynamic_risk_module as
+susceptibility_score would double-count rainfall. `/risk/forecast` is unchanged.
 """
 
 from datetime import datetime
@@ -23,6 +30,7 @@ from app.services import (
     assam_prediction,
     meghalaya_prediction,
     pilot_events,
+    pilot_point_prediction,
     risk_inputs,
     sikkim_prediction,
 )
@@ -62,9 +70,185 @@ def _refuse(resolution, message):
     )
 
 
+# ---------------------------------------------------------------------------
+# Rainfall provenance (additive)
+#
+# app.services.rainfall_service already stamps every rainfall read with its
+# source, quality status and freshness; risk_inputs carries that through in the
+# input record's `details`, and the four pilot prediction services carry it in
+# their `rainfall` block. This layer only RESHAPES what is already there into one
+# consistently-named block so a client does not have to know which producer it is
+# talking to. It computes nothing, defaults nothing, and never invents a value:
+# a field the producer did not supply comes back as None.
+# ---------------------------------------------------------------------------
+RAINFALL_PROVENANCE_FIELDS = (
+    "source",
+    "source_kind",
+    "is_fallback",
+    "data_quality_status",
+    "requested_date",
+    "rainfall_observation_date",
+    "fetched_at_utc",
+    "freshness",
+    "units",
+)
+
+# Emitted verbatim whenever is_fallback is true, so a fallback is unmistakable in
+# the response body itself and not only inferable from a status enum.
+FALLBACK_WARNING = (
+    "FALLBACK RAINFALL: NASA GPM IMERG was unavailable, so this rainfall comes "
+    "from the Open-Meteo ERA5 archive (reanalysis, not a live satellite "
+    "observation). It is labelled data_quality_status=FALLBACK and must not be "
+    "presented as official live rainfall."
+)
+
+
+def _rainfall_provenance(rainfall):
+    """
+    Normalise a producer's rainfall metadata into RAINFALL_PROVENANCE_FIELDS.
+
+    `rainfall` may be the prediction services' `rainfall` report or a
+    risk_inputs input record's `details`; the only shape difference is that the
+    latter names the observation day `target_date`. Returns None when the producer
+    supplied no rainfall metadata at all, rather than an all-None block that could
+    be mistaken for a real read.
+    """
+    if not isinstance(rainfall, dict):
+        return None
+    block = {}
+    for field in RAINFALL_PROVENANCE_FIELDS:
+        block[field] = rainfall.get(field)
+    if block["rainfall_observation_date"] is None:
+        block["rainfall_observation_date"] = rainfall.get("target_date")
+    if not any(v is not None for v in block.values()):
+        return None
+    block["is_fallback"] = bool(block["is_fallback"])
+    if block["is_fallback"]:
+        block["fallback_warning"] = FALLBACK_WARNING
+    caveats = rainfall.get("caveats")
+    if caveats:
+        block["caveats"] = list(caveats)
+    return block
+
+
+def _current_rainfall_block(resolution):
+    """
+    Additive `rainfall` block for the risk endpoints: the observed accumulation
+    that WAS used, with its status and provenance. The value is whatever
+    risk_inputs resolved -- this layer holds no rainfall constant of its own.
+    """
+    record = resolution["inputs"].get(risk_inputs.INPUT_CURRENT_RAINFALL) or {}
+    block = {
+        "accumulation_mm": record.get("value"),
+        "window_hours": (record.get("details") or {}).get("window_hours"),
+        "status": record.get("status"),
+        "has_real_rainfall": resolution["has_real_rainfall"],
+    }
+    provenance = _rainfall_provenance(record.get("details"))
+    if provenance is not None:
+        block.update(provenance)
+    # The producer keeps the human-readable source label on the record itself, not
+    # in `details`, so it is filled in from there rather than left null.
+    if block.get("source") is None:
+        block["source"] = record.get("source")
+    if record.get("reasons"):
+        block["reasons"] = list(record["reasons"])
+    return block
+
+
+def _with_rainfall_provenance(payload):
+    """
+    Attach the normalised block to a pilot prediction response under one
+    consistent key, so all four /predict/<state>/grid endpoints expose rainfall
+    provenance identically. Every pre-existing field, including the producer's own
+    richer `rainfall` report, is left exactly as the service returned it.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    provenance = _rainfall_provenance(payload.get("rainfall"))
+    if provenance is not None:
+        payload["rainfall_provenance"] = provenance
+    return payload
+
+
 @router.get("/risk/current")
-def get_current_risk(lat: float, lon: float):
+def get_current_risk(lat: float, lon: float, state: Optional[str] = None):
+    """
+    Current risk at a point.
+
+    TWO PATHS, chosen by whether the point is inside a canonical pilot AOI, and
+    never silently interchanged:
+
+      * INSIDE a pilot AOI -> app.services.pilot_point_prediction runs that state's
+        persisted 11-feature model at the point with the live rainfall_service
+        series, and the response reports the model's RAINFALL-CONDITIONED hazard
+        probability under `hazard`, with `option_c_fusion.applied = False` and the
+        gate's reason. The Option-C trigger multiplier is NOT applied to it and it
+        is NEVER presented as susceptibility_score or final_risk_score, because the
+        persisted pilot models are rainfall-coupled and doing so would double-count
+        rainfall.
+      * OUTSIDE every pilot AOI -> the pre-existing Option-C path via
+        app.services.risk_inputs, unchanged, which refuses with HTTP 503
+        DATA_UNAVAILABLE when a required real input is missing.
+
+    Query params:
+      * state -- optional pilot state ('Sikkim', 'Assam', 'Arunachal Pradesh',
+        'Meghalaya'). Required where two pilot AOIs overlap (the Assam/Meghalaya and
+        Assam/Arunachal bands): those requests are refused with HTTP 400 and the
+        candidate list rather than resolved to an assumed state.
+
+    HTTP 400 for an unknown/contradictory `state` or an ambiguous point; HTTP 503
+    DATA_UNAVAILABLE when the real inputs cannot be obtained.
+    """
     validate_coordinates(lat, lon)
+
+    # 1. Establish the pilot state EXPLICITLY. There is no Sikkim default: a point
+    #    in no pilot AOI falls through to the pre-existing Option-C path below.
+    pilot_state = None
+    try:
+        pilot_state = pilot_point_prediction.resolve_pilot_state(lat, lon, state=state)
+    except pilot_point_prediction.PointOutsidePilotAoi:
+        # No pilot raster set or model covers this point; fall through to the
+        # pre-existing Option-C path (whose behaviour is unchanged).
+        pilot_state = None
+    except pilot_point_prediction.PilotStateAmbiguous as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "AMBIGUOUS_PILOT_STATE",
+                "reason": exc.reason,
+                "details": exc.details,
+            },
+        )
+    except pilot_point_prediction.PilotStateInvalid as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "INVALID_PILOT_STATE",
+                "reason": exc.reason,
+                "details": exc.details,
+            },
+        )
+
+    # 2. Pilot point path: the real per-state model + live rainfall, no fusion.
+    if pilot_state is not None:
+        try:
+            return _with_rainfall_provenance(
+                pilot_point_prediction.predict_pilot_point(
+                    lat, lon, datetime.utcnow(), state=pilot_state,
+                )
+            )
+        except pilot_point_prediction.PredictionUnavailable as exc:
+            raise HTTPException(
+                status_code=DATA_UNAVAILABLE_STATUS_CODE,
+                detail={
+                    "status": "DATA_UNAVAILABLE",
+                    "reason": exc.reason,
+                    "details": exc.details,
+                },
+            )
+
+    # 3. Pre-existing Option-C path, byte-for-byte unchanged.
     resolution = risk_inputs.resolve_risk_inputs(
         lat, lon, mode=risk_inputs.RISK_MODE_CURRENT
     )
@@ -92,6 +276,9 @@ def get_current_risk(lat: float, lon: float):
         "location": [lat, lon],
         "risk": risk,
         "resolved_inputs": _resolved_input_report(resolution),
+        # Additive: which rainfall product answered, how fresh it is, and whether it
+        # was the labelled Open-Meteo ERA5 fallback rather than live IMERG.
+        "rainfall": _current_rainfall_block(resolution),
     }
 
 
@@ -128,6 +315,9 @@ def get_forecast_risk(lat: float, lon: float):
         "forecast_accumulation_mm": forecast_rain,
         "risk_forecast": risk,
         "resolved_inputs": _resolved_input_report(resolution),
+        # Additive, and about the OBSERVED trigger only: the forecast accumulation
+        # keeps its own existing top-level field above.
+        "rainfall": _current_rainfall_block(resolution),
     }
 
 
@@ -708,9 +898,9 @@ def predict_sikkim_grid(date: Optional[str] = None,
                 detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
             )
     try:
-        return sikkim_prediction.predict_sikkim_grid(
+        return _with_rainfall_provenance(sikkim_prediction.predict_sikkim_grid(
             target_date, step_deg=step, run_type=run_type,
-        )
+        ))
     except sikkim_prediction.PredictionUnavailable as exc:
         raise HTTPException(
             status_code=DATA_UNAVAILABLE_STATUS_CODE,
@@ -766,9 +956,9 @@ def predict_assam_grid(date: Optional[str] = None,
                 detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
             )
     try:
-        return assam_prediction.predict_assam_grid(
+        return _with_rainfall_provenance(assam_prediction.predict_assam_grid(
             target_date, step_deg=step, run_type=run_type,
-        )
+        ))
     except assam_prediction.PredictionUnavailable as exc:
         raise HTTPException(
             status_code=DATA_UNAVAILABLE_STATUS_CODE,
@@ -825,9 +1015,9 @@ def predict_arunachal_grid(date: Optional[str] = None,
                 detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
             )
     try:
-        return arunachal_prediction.predict_arunachal_grid(
+        return _with_rainfall_provenance(arunachal_prediction.predict_arunachal_grid(
             target_date, step_deg=step, run_type=run_type,
-        )
+        ))
     except arunachal_prediction.PredictionUnavailable as exc:
         raise HTTPException(
             status_code=DATA_UNAVAILABLE_STATUS_CODE,
@@ -885,9 +1075,9 @@ def predict_meghalaya_grid(date: Optional[str] = None,
                 detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
             )
     try:
-        return meghalaya_prediction.predict_meghalaya_grid(
+        return _with_rainfall_provenance(meghalaya_prediction.predict_meghalaya_grid(
             target_date, step_deg=step, run_type=run_type,
-        )
+        ))
     except meghalaya_prediction.PredictionUnavailable as exc:
         raise HTTPException(
             status_code=DATA_UNAVAILABLE_STATUS_CODE,

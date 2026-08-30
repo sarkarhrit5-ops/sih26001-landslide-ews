@@ -18,6 +18,7 @@ import pickle
 import sys
 import tokenize
 import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -371,54 +372,216 @@ def test_susceptibility_reports_a_scoring_failure(tmp_path):
 
 # ---------------------------------------------------------------------------
 # Rainfall
+#
+# resolve_current_rainfall now goes through app.services.rainfall_service, so
+# these tests inject fake fetchers at the SERVICE level (its defaults are
+# resolved at call time). Nothing here touches Earthdata, Open-Meteo, or the
+# network, and no rainfall number is hard-coded in the module under test.
 # ---------------------------------------------------------------------------
-def test_current_rainfall_reports_earthdata_failure_without_zero_filling(monkeypatch):
-    def boom(bounds, date, run_type="Early", windows=None):
-        raise PermissionError("EARTHDATA AUTHENTICATION REJECTED (HTTP 401)")
+from app.services import rainfall_service as rs  # noqa: E402 - after the sys.path fixup
 
-    _fake_weather_module(monkeypatch, fetch_imerg_precipitation=boom)
+
+class _NoSession:
+    """A stand-in Earthdata session; the fake fetchers never use it for I/O."""
+
+
+def _imerg_dead(session, day, bounds, run_type):
+    raise PermissionError("EARTHDATA AUTHENTICATION REJECTED (HTTP 401)")
+
+
+def _fallback_dead(bounds, end_date, days):
+    raise RuntimeError("Open-Meteo archive unreachable")
+
+
+def _rainfall_env(monkeypatch, imerg, fallback):
+    """Point the service at fakes and hand back a clean, isolated cache."""
+    monkeypatch.setattr(rs, "_default_imerg_fetcher", imerg)
+    monkeypatch.setattr(rs, "_default_fallback_fetcher", fallback)
+    monkeypatch.setattr(rs, "_default_session_factory", lambda: _NoSession())
+    rs.clear_cache()
+
+
+def test_current_rainfall_reports_earthdata_failure_without_zero_filling(monkeypatch):
+    _rainfall_env(monkeypatch, _imerg_dead, _fallback_dead)
     record = ri.resolve_current_rainfall(INSIDE_LAT, INSIDE_LON)
     assert record["status"] == ri.STATUS_UNAVAILABLE
     assert record["value"] is None, "a failed rainfall fetch must not become 0 mm"
     assert "EARTHDATA AUTHENTICATION REJECTED" in " ".join(record["reasons"])
+    rs.clear_cache()
 
 
 def test_current_rainfall_returns_the_real_accumulation(monkeypatch):
     captured = {}
 
-    def fetch(bounds, date, run_type="Early", windows=None):
-        captured["bounds"] = bounds
-        captured["windows"] = windows
-        return {"source": "IMERG_Early", "target_date": "2026-08-23",
-                "accumulations": {"accumulation_1d_mm": 12.5}}
+    def fetch(session, day, bounds, run_type):
+        captured.setdefault("bounds", bounds)
+        captured.setdefault("run_type", run_type)
+        captured.setdefault("first_day", day)
+        # Day T-1 is 12.5 mm; every earlier day is a different value, so a mistaken
+        # window offset cannot accidentally produce the expected answer.
+        return 12.5 if day == captured["first_day"] else 1.0
 
-    _fake_weather_module(monkeypatch, fetch_imerg_precipitation=fetch)
+    _rainfall_env(monkeypatch, fetch, _fallback_dead)
     record = ri.resolve_current_rainfall(INSIDE_LAT, INSIDE_LON)
     assert record["status"] == ri.STATUS_REAL
     assert record["value"] == 12.5
     assert record["source"] == "IMERG_Early"
-    assert captured["windows"] == [1]
+    assert record["details"]["data_quality_status"] == rs.QUALITY_REAL
+    assert record["details"]["is_fallback"] is False
+    assert record["details"]["window_hours"] == ri.CURRENT_RAINFALL_WINDOW_HOURS
+    assert record["details"]["units"] == "mm"
+    assert record["details"]["freshness"]["cache_hit"] is False
+    assert captured["run_type"] == ri.DEFAULT_IMERG_RUN_TYPE
     # A point-sized window, not the whole AOI averaged together.
     box = captured["bounds"]
     assert abs((box["max_lat"] - box["min_lat"]) - 2 * ri.POINT_BBOX_HALF_WIDTH_DEG) < 1e-9
     assert abs((box["max_lon"] - box["min_lon"]) - 2 * ri.POINT_BBOX_HALF_WIDTH_DEG) < 1e-9
+    rs.clear_cache()
 
 
-@pytest.mark.parametrize("payload", [
-    {},
-    {"accumulations": {}},
-    {"accumulations": {"accumulation_1d_mm": None}},
-    {"accumulations": {"accumulation_1d_mm": -3.0}},
-    {"accumulations": {"accumulation_1d_mm": "wet"}},
-])
-def test_current_rainfall_rejects_unusable_payloads(monkeypatch, payload):
-    _fake_weather_module(
-        monkeypatch,
-        fetch_imerg_precipitation=lambda *a, **k: payload,
+def test_current_rainfall_default_window_still_ends_yesterday(monkeypatch):
+    """The reported day must stay the latest observation at or before yesterday."""
+    _rainfall_env(monkeypatch, lambda s, d, b, r: 4.0, _fallback_dead)
+    record = ri.resolve_current_rainfall(INSIDE_LAT, INSIDE_LON)
+    yesterday = (
+        datetime.now(timezone.utc) - timedelta(days=ri.IMERG_LATENCY_DAYS)
+    ).strftime("%Y-%m-%d")
+    assert record["status"] == ri.STATUS_REAL
+    assert record["details"]["target_date"] == yesterday
+    rs.clear_cache()
+
+
+def test_current_rainfall_explicit_date_reports_that_day(monkeypatch):
+    _rainfall_env(monkeypatch, lambda s, d, b, r: 7.25, _fallback_dead)
+    record = ri.resolve_current_rainfall(
+        INSIDE_LAT, INSIDE_LON, target_date=datetime(2025, 9, 18),
     )
+    assert record["status"] == ri.STATUS_REAL
+    assert record["value"] == 7.25
+    assert record["details"]["target_date"] == "2025-09-18"
+    rs.clear_cache()
+
+
+def test_current_rainfall_fallback_is_labelled_derived_proxy(monkeypatch):
+    def fallback(bounds, end_date, days):
+        return [9.5] + [2.0] * (days - 1)
+
+    _rainfall_env(monkeypatch, _imerg_dead, fallback)
+    record = ri.resolve_current_rainfall(INSIDE_LAT, INSIDE_LON)
+
+    assert record["status"] == ri.STATUS_DERIVED_PROXY
+    assert record["value"] == 9.5, "a usable fallback value is reported, not discarded"
+    assert record["details"]["is_fallback"] is True
+    assert record["details"]["data_quality_status"] == rs.QUALITY_FALLBACK
+    assert record["details"]["source_kind"] == rs.SOURCE_KIND_FALLBACK
+    assert "FALLBACK" in record["source"]
+    joined = " ".join(record["reasons"])
+    assert "FALLBACK" in joined and "IMERG" in joined
+    # The IMERG rejection is recorded rather than hidden.
+    statuses = {a["source_kind"]: a["status"] for a in record["details"]["attempts"]}
+    assert statuses[rs.SOURCE_KIND_IMERG] == "FAILED"
+    assert statuses[rs.SOURCE_KIND_FALLBACK] == "OK"
+    rs.clear_cache()
+
+
+def test_current_rainfall_fallback_degrades_confidence(monkeypatch, tmp_path):
+    """
+    STATUS_DERIVED_PROXY is usable (so /risk/current still answers) but must not
+    count as a real observation, because ml_pipeline gates HIGH confidence on
+    has_real_dem AND has_real_rainfall. The paired REAL case proves the flag is
+    not simply pinned to False.
+    """
+    assert ri.STATUS_DERIVED_PROXY in ri.USABLE_STATUSES
+
+    def _has_real_rainfall(imerg, fallback):
+        _rainfall_env(monkeypatch, imerg, fallback)
+        resolution = ri.resolve_risk_inputs(
+            INSIDE_LAT, INSIDE_LON, mode=ri.RISK_MODE_CURRENT,
+            data_dir=str(tmp_path / "data"), artifact_dir=str(tmp_path / "models"),
+        )
+        rs.clear_cache()
+        return (
+            resolution["has_real_rainfall"],
+            resolution["inputs"][ri.INPUT_CURRENT_RAINFALL]["status"],
+        )
+
+    real_flag, real_status = _has_real_rainfall(lambda s, d, b, r: 9.5, _fallback_dead)
+    assert (real_flag, real_status) == (True, ri.STATUS_REAL)
+
+    proxy_flag, proxy_status = _has_real_rainfall(
+        _imerg_dead, lambda b, e, days: [9.5] + [2.0] * (days - 1),
+    )
+    assert (proxy_flag, proxy_status) == (False, ri.STATUS_DERIVED_PROXY)
+
+
+def test_resolve_risk_inputs_reports_fallback_rainfall_as_not_real(monkeypatch, tmp_path):
+    def fallback(bounds, end_date, days):
+        return [9.5] + [2.0] * (days - 1)
+
+    _rainfall_env(monkeypatch, _imerg_dead, fallback)
+    resolution = ri.resolve_risk_inputs(
+        INSIDE_LAT, INSIDE_LON, mode=ri.RISK_MODE_CURRENT,
+        data_dir=str(tmp_path / "data"), artifact_dir=str(tmp_path / "models"),
+    )
+    rainfall = resolution["inputs"][ri.INPUT_CURRENT_RAINFALL]
+    assert rainfall["status"] == ri.STATUS_DERIVED_PROXY
+    assert rainfall["value"] == 9.5
+    # Usable, so rainfall does not block the response ...
+    assert ri.INPUT_CURRENT_RAINFALL not in resolution["blocking_inputs"]
+    # ... but it is not a real observation, so confidence must degrade.
+    assert resolution["has_real_rainfall"] is False
+    rs.clear_cache()
+
+
+def test_current_rainfall_reuses_the_cached_read(monkeypatch):
+    calls = []
+
+    def fetch(session, day, bounds, run_type):
+        calls.append(day)
+        return 3.0
+
+    _rainfall_env(monkeypatch, fetch, _fallback_dead)
+    first = ri.resolve_current_rainfall(
+        INSIDE_LAT, INSIDE_LON, target_date=datetime(2025, 9, 18),
+    )
+    after_first = len(calls)
+    second = ri.resolve_current_rainfall(
+        INSIDE_LAT, INSIDE_LON, target_date=datetime(2025, 9, 18),
+    )
+
+    assert after_first > 0, "the first read must actually fetch"
+    assert len(calls) == after_first, "the second read must issue no new fetches"
+    assert first["value"] == second["value"] == 3.0
+    assert first["details"]["freshness"]["cache_hit"] is False
+    assert second["details"]["freshness"]["cache_hit"] is True
+    rs.clear_cache()
+
+
+def test_current_rainfall_rejects_an_unusable_date(monkeypatch):
+    _rainfall_env(monkeypatch, lambda s, d, b, r: 3.0, _fallback_dead)
+    record = ri.resolve_current_rainfall(
+        INSIDE_LAT, INSIDE_LON, target_date="not-a-date",
+    )
+    assert record["status"] == ri.STATUS_UNAVAILABLE
+    assert record["value"] is None
+    rs.clear_cache()
+
+
+@pytest.mark.parametrize("series", [
+    ["wet"] + [1.0] * 13,
+    [None] + [1.0] * 13,
+    [-3.0] + [1.0] * 13,
+    [float("nan")] + [1.0] * 13,
+])
+def test_current_rainfall_rejects_unusable_payloads(monkeypatch, series):
+    def fallback(bounds, end_date, days):
+        return list(series)
+
+    _rainfall_env(monkeypatch, _imerg_dead, fallback)
     record = ri.resolve_current_rainfall(INSIDE_LAT, INSIDE_LON)
     assert record["status"] == ri.STATUS_UNAVAILABLE
     assert record["value"] is None
+    rs.clear_cache()
 
 
 def test_forecast_rainfall_failure_is_not_reported_as_no_rain(monkeypatch):

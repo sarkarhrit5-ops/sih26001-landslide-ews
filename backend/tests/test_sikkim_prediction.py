@@ -335,3 +335,170 @@ def test_bad_target_date_string_raises_valueerror():
             terrain_sampler=_pattern_terrain_sampler,
             rainfall_provider=_fake_rainfall_provider,
         )
+
+
+# ---------------------------------------------------------------------------
+# _default_rainfall_provider now delegates to app.services.rainfall_service.
+#
+# These tests inject fake fetchers at the rainfall_service module level (the
+# defaults are resolved at call time) so nothing here touches Earthdata,
+# Open-Meteo, or the network. They prove the four required properties:
+#   * a successful IMERG read flows through as data_quality_status=REAL;
+#   * an Open-Meteo read is explicitly FALLBACK and says so;
+#   * injecting rainfall_provider still bypasses the service entirely;
+#   * the six legacy return keys are unchanged, so _rainfall_report and the
+#     three sister prediction services keep working.
+# ---------------------------------------------------------------------------
+from app.services import rainfall_service as rs  # noqa: E402 - after the sys.path fixup
+
+_LEGACY_PROVIDER_KEYS = (
+    "source", "run_type", "aoi_uniform", "window_days", "daily_series_mm", "features",
+)
+
+
+class _NoSession:
+    """A stand-in session; the fake fetchers never use it for I/O."""
+
+
+def _sikkim_bounds():
+    from app.core.config_states import get_pilot_aoi_bounds
+
+    return get_pilot_aoi_bounds("Sikkim")
+
+
+def _imerg_ok(session, day, bounds, run_type):
+    # A deterministic, non-uniform, strictly positive series.
+    return 1.0 + (day.toordinal() % 5)
+
+
+def _imerg_dead(session, day, bounds, run_type):
+    raise RuntimeError("EARTHDATA IMERG FETCH FAILED (401)")
+
+
+def _fallback_ok(bounds, end_date, days):
+    # Contract: newest-first daily totals, index k == day T-(k+1).
+    return [2.0 + (k % 3) for k in range(days)]
+
+
+def _fallback_dead(bounds, end_date, days):
+    raise RuntimeError("Open-Meteo archive unreachable")
+
+
+def _provider(monkeypatch, imerg, fallback, date="2025-09-19", session=None):
+    monkeypatch.setattr(rs, "_default_imerg_fetcher", imerg)
+    monkeypatch.setattr(rs, "_default_fallback_fetcher", fallback)
+    monkeypatch.setattr(rs, "_default_session_factory", lambda: _NoSession())
+    rs.clear_cache()
+    try:
+        return sp._default_rainfall_provider(_sikkim_bounds(), date, session=session)
+    finally:
+        rs.clear_cache()
+
+
+def test_default_provider_flows_imerg_through_as_real(monkeypatch):
+    payload = _provider(monkeypatch, _imerg_ok, _fallback_dead)
+
+    assert payload["data_quality_status"] == rs.QUALITY_REAL
+    assert payload["source_kind"] == rs.SOURCE_KIND_IMERG
+    assert payload["is_fallback"] is False
+    assert payload["source"] == "IMERG_Early"
+    assert payload["units"] == "mm"
+    assert len(payload["daily_series_mm"]) == sp.RAINFALL_WINDOW_DAYS
+    assert set(payload["features"]) == set(sp.RAINFALL_FEATURES)
+    # Freshness/provenance are present and self-describing.
+    assert payload["freshness"]["cache_hit"] is False
+    assert payload["freshness"]["ttl_seconds"] > 0
+    assert payload["fetched_at_utc"]
+    assert payload["requested_date"] == "2025-09-19"
+    assert payload["rainfall_observation_date"] < payload["requested_date"]
+
+
+def test_default_provider_labels_open_meteo_as_fallback(monkeypatch):
+    payload = _provider(monkeypatch, _imerg_dead, _fallback_ok)
+
+    assert payload["data_quality_status"] == rs.QUALITY_FALLBACK
+    assert payload["source_kind"] == rs.SOURCE_KIND_FALLBACK
+    assert payload["is_fallback"] is True
+    assert "FALLBACK" in payload["source"]
+    # And the report never calls it a live IMERG observation.
+    report = sp._rainfall_report(payload)
+    assert report["data_quality_status"] == rs.QUALITY_FALLBACK
+    assert report["is_fallback"] is True
+    assert "NOT an official live IMERG observation" in report["note"]
+    assert "One AOI-mean IMERG series" not in report["note"]
+
+
+def test_default_provider_refuses_when_both_sources_fail(monkeypatch):
+    with pytest.raises(sp.PredictionUnavailable):
+        _provider(monkeypatch, _imerg_dead, _fallback_dead)
+
+
+def test_default_provider_uses_the_injected_session(monkeypatch):
+    seen = []
+
+    def _record_session(session, day, bounds, run_type):
+        seen.append(session)
+        return 3.0
+
+    def _explode():
+        raise AssertionError("a session was created even though one was injected")
+
+    monkeypatch.setattr(rs, "_default_imerg_fetcher", _record_session)
+    monkeypatch.setattr(rs, "_default_fallback_fetcher", _fallback_dead)
+    monkeypatch.setattr(rs, "_default_session_factory", _explode)
+    rs.clear_cache()
+    try:
+        injected = _NoSession()
+        payload = sp._default_rainfall_provider(
+            _sikkim_bounds(), "2025-09-19", session=injected,
+        )
+    finally:
+        rs.clear_cache()
+
+    assert payload["data_quality_status"] == rs.QUALITY_REAL
+    assert seen and all(s is injected for s in seen)
+
+
+def test_default_provider_keeps_every_legacy_return_key(monkeypatch):
+    payload = _provider(monkeypatch, _imerg_ok, _fallback_dead)
+    for key in _LEGACY_PROVIDER_KEYS:
+        assert key in payload, key
+    assert payload["aoi_uniform"] is True
+    assert payload["window_days"] == sp.RAINFALL_WINDOW_DAYS
+    # The payload is directly consumable by the existing grid assembly.
+    result = sp.predict_sikkim_grid(
+        "2025-09-19", step_deg=0.25,
+        model_evidence=_valid_evidence(_FakeModel()),
+        terrain_sampler=_pattern_terrain_sampler,
+        rainfall_provider=lambda bounds, target_date, run_type="Early": payload,
+    )
+    assert result["rainfall"]["data_quality_status"] == rs.QUALITY_REAL
+    assert result["summary"]["cells_scored"] > 0
+
+
+def test_provider_injection_still_bypasses_the_rainfall_service(monkeypatch):
+    def _never(*args, **kwargs):
+        raise AssertionError("rainfall_service was consulted despite an injected provider")
+
+    monkeypatch.setattr(rs, "get_state_rainfall", _never)
+    result, _model = _run()
+    assert result["rainfall"]["source"] == "IMERG_Early"
+
+
+def test_state_label_is_resolved_from_the_bbox_not_assumed():
+    assert sp._state_for_bounds(_sikkim_bounds()) == "Sikkim"
+    assert sp._state_for_bounds({
+        "min_lat": 1.0, "max_lat": 2.0, "min_lon": 3.0, "max_lon": 4.0,
+    }) == sp._UNMATCHED_AOI_LABEL
+    assert sp._state_for_bounds(None) == sp._UNMATCHED_AOI_LABEL
+
+
+def test_legacy_provider_without_provenance_still_reports_cleanly():
+    """A provider predating the new fields must not gain fabricated provenance."""
+    legacy = _fake_rainfall_provider(_sikkim_bounds(), "2025-09-19")
+    report = sp._rainfall_report(legacy)
+    for key in ("source", "run_type", "aoi_uniform", "window_days", "features", "note"):
+        assert key in report
+    for key in sp._RAINFALL_PROVENANCE_KEYS:
+        assert key not in report, key
+    assert report["note"] == sp._LEGACY_RAINFALL_NOTE
