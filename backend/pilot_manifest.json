@@ -1,0 +1,84 @@
+{
+  "artifacts": {
+    "arunachal_pilot_aspect.tif": {
+      "bytes": 193136568,
+      "sha256": "cbacd21936c23743a6628f7ead4100b5bde01349a6e55cdfe5fd1cf5d9bd6908"
+    },
+    "arunachal_pilot_dem.tif": {
+      "bytes": 193136550,
+      "sha256": "4e1d006b83bbaf0b49c933fdda12ca7e3f2a3c1146bae205b907e2303fa7e8fd"
+    },
+    "arunachal_pilot_roughness.tif": {
+      "bytes": 193136568,
+      "sha256": "2b152d6ef2c2a93d59ba8d6332c128ac715e7fe0d64ac13c43e15904d1564305"
+    },
+    "arunachal_pilot_slope.tif": {
+      "bytes": 193136568,
+      "sha256": "90cce307920327562c9cd1389ac68289ede698bcdf6577de9177d73c0a592d63"
+    },
+    "arunachal_pilot_tpi.tif": {
+      "bytes": 193136568,
+      "sha256": "fc72c41a0e5593684a9d30e6e81a513a175b031b701f50ccaff61d37844bf383"
+    },
+    "assam_pilot_aspect.tif": {
+      "bytes": 124437984,
+      "sha256": "5fc6c13a35e8a0d98b69d7eda0ff5766e05a9314bac48b3ff072f38fb2da60f1"
+    },
+    "assam_pilot_dem.tif": {
+      "bytes": 124437966,
+      "sha256": "94d343600d7ac572f9d5f9ed2d56c3cfce26dbf0eefadf09583bf611b15991a8"
+    },
+    "assam_pilot_roughness.tif": {
+      "bytes": 124437984,
+      "sha256": "12c7fdfb4baa5d7017c48300c421bfba8bfe8015d609b4700677dcd9fa610b20"
+    },
+    "assam_pilot_slope.tif": {
+      "bytes": 124437984,
+      "sha256": "da2ef5d53f4dd47d95776e52dd229c8a9e32225c5c0504509fdf8bcf895b273f"
+    },
+    "assam_pilot_tpi.tif": {
+      "bytes": 124437984,
+      "sha256": "c25d9d88c6eb77993d4a00c738e5b1c690eaa1fcd28bbe5bdf8de2fc1d9dba7a"
+    },
+    "meghalaya_pilot_aspect.tif": {
+      "bytes": 92400648,
+      "sha256": "2cf1fead9f7a2aa4800e1b2f4ab9568ae262a686abb2f6160b9520759d0037e3"
+    },
+    "meghalaya_pilot_dem.tif": {
+      "bytes": 92400630,
+      "sha256": "7981e3b639225d21adb3896fb7eb3755299634dac4ea793184b254aa3bccb302"
+    },
+    "meghalaya_pilot_roughness.tif": {
+      "bytes": 92400648,
+      "sha256": "beb744f2be5da59978d3c7fe310b40f8849a3532392e7cdb997b4482552a51d5"
+    },
+    "meghalaya_pilot_slope.tif": {
+      "bytes": 92400648,
+      "sha256": "cf7f3a77cc0118e426f84cd87fd5f4549b767f1732c9026452c27a8f5cace015"
+    },
+    "meghalaya_pilot_tpi.tif": {
+      "bytes": 92400648,
+      "sha256": "51fee2dc3c75b8eb74df3237474986f06b1d0064d61f74711f399ffed310f00d"
+    },
+    "sikkim_aspect.tif": {
+      "bytes": 51345744,
+      "sha256": "354578f3cdc7726646bb3b2ba6903aa5062ea0e6b1d7a6b6eb8a3cc503b9ab91"
+    },
+    "sikkim_dem.tif": {
+      "bytes": 51345726,
+      "sha256": "a9bad95556b66be35358afd97b4ce060bdd04d267ffc49ced62711cebe8bc94d"
+    },
+    "sikkim_roughness.tif": {
+      "bytes": 51345744,
+      "sha256": "d2a7c6f6089de485c36c9e59d911a1af4ac1019b61ad5a4fc21c2035f93e1712"
+    },
+    "sikkim_slope.tif": {
+      "bytes": 51345744,
+      "sha256": "098903764ba59be42f35228be0e26722866b5bfdd961f3c3d50dd55975f877a1"
+    },
+    "sikkim_tpi.tif": {
+      "bytes": 51345744,
+      "sha256": "5044950e8965e3cfaa77439650a01e27330cdb9d71857a90da5d304d3a5bd5fa"
+    }
+  }
+}

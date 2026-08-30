@@ -61,7 +61,11 @@ HEAVY DEPENDENCIES / THREADING
     to available once the work completes.
 
 ENVIRONMENT
-    SIH_PILOT_TERRAIN_BOOTSTRAP=0     disable entirely (default: enabled)
+    SIH_PILOT_TERRAIN_BOOTSTRAP=1     enable this regeneration path (DEFAULT: OFF --
+                                      the uncapped mosaic merge OOM-killed the Render
+                                      instance with exit status 137; production instead
+                                      DOWNLOADS the prebuilt rasters, see
+                                      app/services/pilot_artifact_store.py)
     SIH_PILOT_TERRAIN_BOOTSTRAP_BLOCKING=1
                                       run inline during startup instead of on a
                                       background thread (useful for CLI/one-shot jobs)
@@ -297,10 +301,18 @@ def ensure_pilot_terrain(data_dir=None, states=PILOT_TERRAIN_STATES, chunk_size=
 
 
 def bootstrap_enabled(env=None):
-    """True unless SIH_PILOT_TERRAIN_BOOTSTRAP is set to a falsey value."""
+    """
+    True only when SIH_PILOT_TERRAIN_BOOTSTRAP is explicitly switched ON.
+
+    DEFAULT IS OFF. Regeneration runs acquire_state_dem(limit_tiles=False), whose
+    rasterio.merge.merge materialises whole mosaics in memory; on a small instance that
+    OOM-kills the process (Render exit status 137). Production populates these rasters by
+    DOWNLOADING them instead -- see app/services/pilot_artifact_store.py. This path stays
+    available for a host or a large worker, but can no longer be reached by accident.
+    """
     env = os.environ if env is None else env
-    raw = str(env.get("SIH_PILOT_TERRAIN_BOOTSTRAP", "1")).strip().lower()
-    return raw not in ("0", "false", "no", "off", "")
+    raw = str(env.get("SIH_PILOT_TERRAIN_BOOTSTRAP", "0")).strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def bootstrap_blocking(env=None):
@@ -318,8 +330,9 @@ def start_pilot_terrain_bootstrap(env=None, **kwargs):
     """
     env = os.environ if env is None else env
     if not bootstrap_enabled(env):
-        logger.info("[pilot-bootstrap] disabled via SIH_PILOT_TERRAIN_BOOTSTRAP; "
-                    "pilot DEM status will reflect whatever is already on disk.")
+        logger.info("[pilot-bootstrap] not enabled (set SIH_PILOT_TERRAIN_BOOTSTRAP=1 "
+                    "to regenerate terrain locally); pilot DEM status will reflect "
+                    "whatever is already on disk.")
         return None
 
     if bootstrap_blocking(env):

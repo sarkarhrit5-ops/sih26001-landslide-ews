@@ -397,12 +397,23 @@ def test_check_failure_is_reported_without_acquiring(monkeypatch):
 # --------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("raw,expected", [
-    (None, True), ("1", True), ("true", True), ("on", True),
-    ("0", False), ("false", False), ("no", False), ("off", False), ("", False),
+    (None, False), ("", False),
+    ("0", False), ("false", False), ("no", False), ("off", False),
+    ("1", True), ("true", True), ("on", True), ("yes", True),
 ])
 def test_bootstrap_enabled_gate(raw, expected):
+    """
+    DEFAULT MUST BE OFF. Regenerating the mosaics OOM-killed the Render instance
+    (exit 137); production downloads the prebuilt rasters instead. Opting in must be
+    explicit, so an unset variable can never start a multi-hundred-MB rebuild.
+    """
     env = {} if raw is None else {"SIH_PILOT_TERRAIN_BOOTSTRAP": raw}
     assert ptb.bootstrap_enabled(env) is expected
+
+
+def test_start_does_nothing_when_the_variable_is_unset():
+    """An unset SIH_PILOT_TERRAIN_BOOTSTRAP must not regenerate anything."""
+    assert ptb.start_pilot_terrain_bootstrap(env={}) is None
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -426,7 +437,8 @@ def test_start_runs_inline_when_blocking(monkeypatch):
     monkeypatch.setattr(ptb, "ensure_pilot_terrain",
                         lambda **kw: {"results": [], "acted": 0, "skipped": 0, "failed": 0})
     out = ptb.start_pilot_terrain_bootstrap(
-        env={"SIH_PILOT_TERRAIN_BOOTSTRAP_BLOCKING": "1"})
+        env={"SIH_PILOT_TERRAIN_BOOTSTRAP": "1",
+             "SIH_PILOT_TERRAIN_BOOTSTRAP_BLOCKING": "1"})
     assert isinstance(out, dict)
     assert out["acted"] == 0
 
@@ -434,7 +446,8 @@ def test_start_runs_inline_when_blocking(monkeypatch):
 def test_start_uses_a_background_daemon_thread_by_default(monkeypatch):
     done = []
     monkeypatch.setattr(ptb, "ensure_pilot_terrain", lambda **kw: done.append(True))
-    thread = ptb.start_pilot_terrain_bootstrap(env={})
+    thread = ptb.start_pilot_terrain_bootstrap(
+        env={"SIH_PILOT_TERRAIN_BOOTSTRAP": "1"})
     assert isinstance(thread, ptb.threading.Thread)
     assert thread.daemon is True
     thread.join(timeout=5)
@@ -446,7 +459,8 @@ def test_background_thread_swallows_unexpected_failures(monkeypatch):
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(ptb, "ensure_pilot_terrain", _boom)
-    thread = ptb.start_pilot_terrain_bootstrap(env={})
+    thread = ptb.start_pilot_terrain_bootstrap(
+        env={"SIH_PILOT_TERRAIN_BOOTSTRAP": "1"})
     thread.join(timeout=5)
     assert not thread.is_alive()
 

@@ -8,22 +8,27 @@ from app.api import routes
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
-    Prepare the Assam / Arunachal Pradesh / Meghalaya pilot terrain rasters ONCE, at
-    startup, instead of on every /api/v1/validation/status request.
+    Make the Assam / Arunachal Pradesh / Meghalaya pilot terrain rasters available ONCE,
+    at startup, instead of on every /api/v1/validation/status request.
 
-    A freshly deployed instance has never run scripts/prepare_<state>_terrain.py, so
-    the five pilot rasters those dashboards read are absent and DEM status honestly
-    reports missing. This hook closes that gap by reusing the existing
-    acquire_state_dem() + process_dem_in_chunks() logic.
+    A freshly deployed instance has never run scripts/prepare_<state>_terrain.py, so the
+    five pilot rasters those dashboards read are absent and DEM status honestly reports
+    missing. Two paths can close that gap, both idempotent, both on a background daemon
+    thread so the app binds its port and serves /health immediately, and neither ever
+    fabricating availability -- on failure the real error is logged and the rasters stay
+    absent:
 
-    It is idempotent (a pilot whose artifacts already exist is skipped with zero
-    network I/O), it never fabricates availability (on failure the real error is
-    logged and the rasters stay absent, so DEM status stays unavailable), it leaves
-    Sikkim alone, and by default it runs on a background daemon thread so the app
-    binds its port and serves /health immediately. Set
-    SIH_PILOT_TERRAIN_BOOTSTRAP=0 to disable it entirely.
+      1. DOWNLOAD the prebuilt artifacts from object storage (the production path).
+         Off unless SIH_PILOT_ARTIFACT_BASE_URL is configured. Memory-flat.
+      2. REGENERATE them from Copernicus GLO-30. Off unless
+         SIH_PILOT_TERRAIN_BOOTSTRAP=1, because the uncapped mosaic merge OOM-killed the
+         Render instance (exit status 137).
+
+    Both leave Sikkim alone, and with neither configured this hook is a no-op.
     """
+    from app.services.pilot_artifact_store import start_pilot_artifact_fetch
     from app.services.pilot_terrain_bootstrap import start_pilot_terrain_bootstrap
+    start_pilot_artifact_fetch()
     start_pilot_terrain_bootstrap()
     yield
 
