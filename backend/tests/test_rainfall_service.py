@@ -257,7 +257,11 @@ def test_probe_value_is_reused_so_no_day_is_fetched_twice():
 
 def test_probe_walks_back_over_missing_granules():
     imerg = FakeImerg(missing_days=3)
-    record = _call(imerg_fetcher=imerg)
+    # TARGET == the FakeClock's "now", so this is a NEAR_REAL_TIME request; opt in
+    # to a longer reach because what is under test here is the walk mechanics, not
+    # the near-real-time probe policy (which has its own tests below).
+    with _env_override(**{rs.ENV_IMERG_RECENT_PROBE_DAYS: "10"}):
+        record = _call(imerg_fetcher=imerg)
 
     assert record["data_quality_status"] == rs.QUALITY_REAL
     assert record["timestamp"]["rainfall_observation_date"] == "2026-08-16"
@@ -566,15 +570,175 @@ def test_deadline_stops_a_slow_walk():
             fallback_fetcher=FakeFallback(fail_with=RuntimeError("offline")),
         )
     assert record["data_quality_status"] == rs.QUALITY_UNAVAILABLE
-    assert "budget of 30s exhausted" in record["unavailable_reason"]
+    # The walk is now bounded by the IMERG phase share of the budget, so the
+    # message names that phase; the total budget is still 30s and unchanged.
+    assert "IMERG phase budget" in record["unavailable_reason"]
+    assert "30s rainfall acquisition budget" in record["unavailable_reason"]
 
 
 def test_worst_case_call_count_is_bounded():
-    with _env_override(**{rs.ENV_MAX_PROBE_DAYS: "30"}):
+    with _env_override(**{rs.ENV_MAX_PROBE_DAYS: "30",
+                          rs.ENV_IMERG_RECENT_PROBE_DAYS: "30"}):
         imerg = FakeImerg(missing_days=5)
         _call(imerg_fetcher=imerg)
     # 6 probes (5 x 404 + 1 hit) + 13 remaining window days = 19, not 20.
     assert len(imerg.calls) == 19
+
+
+# ---------------------------------------------------------------------------
+# Latency-aware probing (_probe_plan)
+#
+# A current-date request must not spend the whole wall-clock budget discovering
+# that IMERG is not serving recent days -- that is what starved the fallback and
+# produced the 120s deadline failures on the host.
+# ---------------------------------------------------------------------------
+def test_near_real_time_exhaustion_probes_only_the_recent_reach():
+    imerg = FakeImerg(missing_days=999)          # nothing is published at all
+    fallback = FakeFallback()
+    record = _call(imerg_fetcher=imerg, fallback_fetcher=fallback)
+
+    # 3 probes (the default near-real-time reach), NOT 30.
+    assert len(imerg.calls) == 3
+    assert imerg.days == ["2026-08-19", "2026-08-18", "2026-08-17"]
+    # The budget the short walk saved is exactly what lets the fallback run.
+    assert record["data_quality_status"] == rs.QUALITY_FALLBACK
+    assert record["source_kind"] == rs.SOURCE_KIND_FALLBACK
+    assert len(fallback.calls) == 1
+
+
+def test_the_short_walk_says_why_it_was_short():
+    """A shortened probe is never silent: the reason explains itself."""
+    imerg = FakeImerg(missing_days=999)
+    record = _call(
+        imerg_fetcher=imerg,
+        fallback_fetcher=FakeFallback(fail_with=RuntimeError("offline")),
+    )
+    reason = record["attempts"][0]["reason"]
+    assert rs.PROBE_MODE_NEAR_REAL_TIME in reason
+    assert "T-1..T-3" in reason
+    assert "one granule per" in reason
+    # And an exhausted IMERG plus a dead fallback still fabricates nothing.
+    assert record["data_quality_status"] == rs.QUALITY_UNAVAILABLE
+    assert record["daily_series_mm"] is None
+    assert record["features"] is None
+
+
+def test_a_target_past_the_grace_window_keeps_the_full_reach():
+    target = TARGET - timedelta(days=3)          # older than the 2-day grace
+    imerg = FakeImerg(missing_days=999)
+    record = _call(
+        target_date=target, imerg_fetcher=imerg, fallback_fetcher=FakeFallback()
+    )
+    assert len(imerg.calls) == 30
+    assert rs.PROBE_MODE_HISTORICAL in record["attempts"][0]["reason"]
+    assert record["data_quality_status"] == rs.QUALITY_FALLBACK
+
+
+def test_historical_target_still_returns_real_at_fourteen_calls():
+    """Requirement 4: the 2025-09-18 REAL behaviour is unchanged."""
+    historical = datetime(2025, 9, 18)
+    imerg = FakeImerg()                          # every granule exists
+    record = _call(target_date=historical, imerg_fetcher=imerg)
+
+    assert record["data_quality_status"] == rs.QUALITY_REAL
+    assert record["source_kind"] == rs.SOURCE_KIND_IMERG
+    assert record["timestamp"]["rainfall_observation_date"] == "2025-09-17"
+    assert len(imerg.calls) == 14                # probe value reused as T-1
+    freshness = record["freshness"]
+    assert freshness["probe_mode"] == rs.PROBE_MODE_HISTORICAL
+    assert freshness["probe_first_offset"] == 1
+    assert freshness["probe_reach"] == 30
+    assert freshness["probe_days_walked"] == 1
+
+
+def test_current_date_success_still_costs_fourteen_calls():
+    """The optimization only trims futile probes; a served day is unaffected."""
+    imerg = FakeImerg()
+    record = _call(imerg_fetcher=imerg)
+
+    assert record["data_quality_status"] == rs.QUALITY_REAL
+    assert len(imerg.calls) == 14
+    freshness = record["freshness"]
+    assert freshness["probe_mode"] == rs.PROBE_MODE_NEAR_REAL_TIME
+    assert freshness["probe_first_offset"] == 1
+    assert freshness["probe_reach"] == 3
+    assert freshness["probe_days_walked"] == 1
+
+
+def test_unavailable_record_reports_no_probe_metadata():
+    record = _call(
+        imerg_fetcher=FakeImerg(fail_with=RuntimeError("imerg down")),
+        fallback_fetcher=FakeFallback(fail_with=RuntimeError("offline")),
+    )
+    for key in ("probe_days_walked", "probe_first_offset", "probe_reach", "probe_mode"):
+        assert key in record["freshness"]
+        assert record["freshness"][key] is None
+
+
+def test_probe_plan_unit_cases():
+    now = datetime(2026, 8, 20, 12, 0, 0)
+    near = rs.PROBE_MODE_NEAR_REAL_TIME
+    historical = rs.PROBE_MODE_HISTORICAL
+
+    # Current date: a short reach starting at T-1 for the low-latency products.
+    assert rs._probe_plan(datetime(2026, 8, 20), "Early", now) == (1, 3, near)
+    assert rs._probe_plan(datetime(2026, 8, 19), "Late", now) == (1, 3, near)
+    # Past the grace window: the previous full reach, starting at T-1.
+    assert rs._probe_plan(datetime(2026, 8, 17), "Early", now) == (1, 30, historical)
+    # A very old target is unaffected by product latency.
+    assert rs._probe_plan(datetime(2025, 9, 18), "Final", now) == (1, 30, historical)
+
+
+def test_probe_plan_skips_days_a_product_cannot_have_published():
+    now = datetime(2026, 8, 20, 12, 0, 0)
+    # Future-dated request: T-1 is today, which Early cannot have published yet.
+    assert rs._probe_plan(datetime(2026, 8, 21), "Early", now) == (
+        2, 4, rs.PROBE_MODE_NEAR_REAL_TIME
+    )
+    # Final has ~3.5 months of latency, so for a current date nothing is within
+    # the configured reach: the plan is empty (last < first).
+    first, last, _mode = rs._probe_plan(datetime(2026, 8, 20), "Final", now)
+    assert first > last
+
+
+def test_an_empty_plan_issues_no_request_and_no_session():
+    sessions = []
+
+    def counting_factory():
+        sessions.append(1)
+        return object()
+
+    imerg = FakeImerg(missing_days=999)
+    record = _call(
+        run_type="Final", imerg_fetcher=imerg, session_factory=counting_factory,
+        fallback_fetcher=FakeFallback(),
+    )
+    assert imerg.calls == []
+    assert sessions == []                        # not even a credentialed session
+    assert "provably 404" in record["attempts"][0]["reason"]
+    assert record["data_quality_status"] == rs.QUALITY_FALLBACK
+
+
+def test_the_imerg_phase_budget_leaves_room_for_the_fallback():
+    """
+    The core host failure: a slow IMERG walk consumed the whole budget and the
+    fallback was never called. IMERG is now capped at a share of the (unchanged)
+    total budget, so the fallback still gets its turn.
+    """
+    clock = FakeClock()
+
+    def slow(session, day, bounds, run_type):
+        clock.advance(20)
+        raise RuntimeError("EARTHDATA IMERG FETCH FAILED: 404 Not Found")
+
+    fallback = FakeFallback()
+    with _env_override(**{rs.ENV_DEADLINE: "100",
+                          rs.ENV_IMERG_RECENT_PROBE_DAYS: "30"}):
+        record = _call(imerg_fetcher=slow, clock=clock, fallback_fetcher=fallback)
+
+    assert "IMERG phase budget" in record["attempts"][0]["reason"]
+    assert len(fallback.calls) == 1
+    assert record["data_quality_status"] == rs.QUALITY_FALLBACK
 
 
 # ---------------------------------------------------------------------------

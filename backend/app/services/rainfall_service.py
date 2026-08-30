@@ -24,6 +24,11 @@ WHAT IT GUARANTEES
     their arithmetic are unchanged.
   * One fetch per state AOI per TTL, never per grid cell and never per frontend
     request. Cached entries carry explicit freshness metadata.
+  * Latency-aware probing. A current-date request probes only the days IMERG could
+    plausibly have published (see _probe_plan); it does not spend 30 sequential
+    OPeNDAP round trips discovering that the product is not serving recent data,
+    which previously consumed the whole wall-clock budget and starved the
+    fallback. Historical requests keep the full 30-day reach.
   * Memory-flat: an entry is 14 floats plus small metadata, the cache is bounded,
     and no raster or NetCDF payload is retained (IMERG parsing still happens in
     weather_ingestion's tempfile-and-delete path).
@@ -89,12 +94,38 @@ ENV_MAX_PROBE_DAYS = "SIH_RAINFALL_MAX_PROBE_DAYS"
 ENV_DEADLINE = "SIH_RAINFALL_DEADLINE_SECONDS"
 ENV_CACHE_MAX_ENTRIES = "SIH_RAINFALL_CACHE_MAX_ENTRIES"
 ENV_FALLBACK_ENABLED = "SIH_RAINFALL_FALLBACK"
+ENV_IMERG_RECENT_PROBE_DAYS = "SIH_RAINFALL_IMERG_RECENT_PROBE_DAYS"
+ENV_IMERG_RECENT_GRACE_DAYS = "SIH_RAINFALL_IMERG_RECENT_GRACE_DAYS"
 
 DEFAULT_CACHE_TTL_SECONDS = 1800.0        # 30 minutes, product-cadence independent
 DEFAULT_NEGATIVE_TTL_SECONDS = 120.0      # short: a refusal must not stick around
-DEFAULT_MAX_PROBE_DAYS = 30               # preserves the previous probe reach
+DEFAULT_MAX_PROBE_DAYS = 30               # historical reach, unchanged
 DEFAULT_DEADLINE_SECONDS = 120.0          # bounds the worst-case fan-out
 DEFAULT_CACHE_MAX_ENTRIES = 16            # 4 pilots x a few dates/run types
+
+# Near-real-time probing. IMERG publishes ONE granule per observation day,
+# contiguously. If the newest plausibly-published day 404s, and so do the two
+# before it, the product is not serving recent data for this account/AOI -- 27
+# further round trips cannot change that outcome, they only burn the wall-clock
+# budget the Open-Meteo fallback then needs. A HISTORICAL request keeps the full
+# DEFAULT_MAX_PROBE_DAYS reach, because a historical hole genuinely can be an
+# isolated missing granule.
+DEFAULT_IMERG_RECENT_PROBE_DAYS = 3
+DEFAULT_IMERG_RECENT_GRACE_DAYS = 2       # target this recent => NEAR_REAL_TIME
+
+PROBE_MODE_NEAR_REAL_TIME = "NEAR_REAL_TIME"
+PROBE_MODE_HISTORICAL = "HISTORICAL"
+
+# Publication latency per product, in whole days. Used ONLY to skip candidate
+# days that provably cannot be published yet -- never to skip a day that might
+# exist. Early ~4-6 h and Late ~14 h both land inside one day, so for those two
+# products this is a no-op and their behaviour is bit-identical to before.
+IMERG_PRODUCT_LATENCY_DAYS = {"Early": 1, "Late": 1, "Final": 105}
+
+# The IMERG phase may not consume the whole acquisition budget: without this a
+# slow probe walk starves a fallback that would have answered in under a second.
+# The TOTAL budget is unchanged -- this only splits it.
+IMERG_PHASE_BUDGET_FRACTION = 0.75
 
 def _env_number(name, default, minimum=0.0):
     raw = os.environ.get(name)
@@ -141,6 +172,24 @@ def fallback_enabled():
     return _env_flag(ENV_FALLBACK_ENABLED, True)
 
 
+def imerg_recent_probe_days():
+    """How many candidate days a NEAR_REAL_TIME request may probe."""
+    return int(_env_number(
+        ENV_IMERG_RECENT_PROBE_DAYS, DEFAULT_IMERG_RECENT_PROBE_DAYS, minimum=1.0
+    ))
+
+
+def imerg_recent_grace_days():
+    """A target date this many days old (or newer) counts as NEAR_REAL_TIME."""
+    return int(_env_number(
+        ENV_IMERG_RECENT_GRACE_DAYS, DEFAULT_IMERG_RECENT_GRACE_DAYS, minimum=0.0
+    ))
+
+
+def imerg_product_latency_days(run_type):
+    return int(IMERG_PRODUCT_LATENCY_DAYS.get(run_type, 1))
+
+
 # ---------------------------------------------------------------------------
 # Time helpers
 # ---------------------------------------------------------------------------
@@ -168,6 +217,57 @@ def _day(value):
 def _iso(value):
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+
+def _probe_plan(target_date, run_type, now):
+    """
+    Decide WHICH candidate days the latest-granule walk may try, from the
+    product's real publication characteristics instead of a fixed 30.
+
+    Returns (first_offset, last_offset, mode) where an offset of k means the day
+    target_date - k.
+
+      first_offset  the newest day that could plausibly be published already.
+                    For Early/Late this is always 1 (their latency is hours), so
+                    nothing changes for them; a current-date Final request stops
+                    probing the ~104 days it cannot possibly have yet.
+      last_offset   NEAR_REAL_TIME  -> first_offset + imerg_recent_probe_days() - 1
+                    HISTORICAL      -> max_probe_days()  (the previous reach)
+      mode          reported in the record so a short walk is never silent.
+
+    last_offset is clamped by max_probe_days(), so that knob still bounds
+    everything: setting it to 3 still yields at most 3 probes. If the newest
+    publishable day lies beyond that reach the plan is EMPTY (last < first) and
+    the caller refuses without issuing a single request.
+    """
+    reach_limit = max_probe_days()
+    target_age_days = int((now.date() - target_date.date()).days)
+    latency = imerg_product_latency_days(run_type)
+
+    first_offset = max(1, latency - target_age_days)
+
+    if target_age_days <= imerg_recent_grace_days():
+        mode = PROBE_MODE_NEAR_REAL_TIME
+        last_offset = first_offset + imerg_recent_probe_days() - 1
+    else:
+        mode = PROBE_MODE_HISTORICAL
+        last_offset = reach_limit
+
+    last_offset = min(last_offset, reach_limit)
+    if first_offset > reach_limit:
+        # Nothing within the configured reach can exist yet: an empty plan.
+        return first_offset, first_offset - 1, mode
+    return first_offset, last_offset, mode
+
+
+def _latency_label(run_type):
+    """Human-readable publication latency, for self-explaining error messages."""
+    if run_type == "Early":
+        return "4-6 h"
+    if run_type == "Late":
+        return "14 h"
+    return "3.5 months"
+
+
 class RainfallDeadlineExceeded(Exception):
     """The wall-clock budget for one rainfall acquisition ran out."""
 
@@ -187,8 +287,24 @@ class _Deadline(object):
     def elapsed(self):
         return (self._clock() - self._started).total_seconds()
 
-    def check(self, what):
-        if self.elapsed() > self._budget:
+    def check(self, what, fraction=1.0):
+        """
+        `fraction` bounds ONE PHASE of the acquisition without changing the total
+        budget: the IMERG walk gets IMERG_PHASE_BUDGET_FRACTION of it so that an
+        overrunning probe cannot leave the Open-Meteo fallback with no time at
+        all. The fallback itself checks with the full budget.
+        """
+        share = float(fraction)
+        if share <= 0.0 or share > 1.0:
+            share = 1.0
+        budget = self._budget * share
+        if self.elapsed() > budget:
+            if share < 1.0:
+                raise RainfallDeadlineExceeded(
+                    "IMERG phase budget of %.0fs (%.0f%% of the %.0fs rainfall "
+                    "acquisition budget, reserved so the fallback is not starved) "
+                    "exhausted while %s" % (budget, share * 100.0, self._budget, what)
+                )
             raise RainfallDeadlineExceeded(
                 "rainfall acquisition budget of %.0fs exhausted while %s"
                 % (self._budget, what)
@@ -375,24 +491,46 @@ def _default_session_factory():
 
 
 def _acquire_imerg_window(bounds, target_date, run_type, window_days,
-                          imerg_fetcher, session_factory, deadline):
+                          imerg_fetcher, session_factory, deadline, now=None):
     """
     Walk backward for the latest available granule, then complete the antecedent
     window ending on it.
 
-    Unlike the previous inline implementation, the value fetched by the successful
-    probe is REUSED as day T-1 instead of being discarded and refetched -- one
-    fewer OPeNDAP round trip on every single request.
+    Two bounded-fan-out properties matter here:
+      * the value fetched by the successful probe is REUSED as day T-1 instead of
+        being discarded and refetched -- one fewer OPeNDAP round trip per request;
+      * WHICH days may be probed comes from _probe_plan, so a current-date request
+        against a product that is not publishing recent data costs a handful of
+        round trips instead of 30 (see _probe_plan for the reasoning). Historical
+        requests keep the full reach.
     """
+    first_offset, last_offset, probe_mode = _probe_plan(
+        target_date, run_type, now or _utcnow()
+    )
+    probe_reach = max(0, last_offset - first_offset + 1)
+
+    if probe_reach == 0:
+        # The newest publishable day lies beyond the configured reach: every
+        # request would provably 404, so none is issued.
+        raise ValueError(
+            "IMERG %s cannot have published any day within the configured %d-day "
+            "probe reach for %s: with ~%s latency the newest publishable "
+            "observation is T-%d. Refusing to issue a request that provably 404s."
+            % (run_type, max_probe_days(), _day(target_date),
+               _latency_label(run_type), first_offset)
+        )
+
     session = session_factory()
-    probe_limit = max_probe_days()
 
     latest_date = None
     latest_value = None
     probe_days_walked = 0
 
-    for offset in range(1, probe_limit + 1):
-        deadline.check("probing for the latest available IMERG %s granule" % run_type)
+    for offset in range(first_offset, last_offset + 1):
+        deadline.check(
+            "probing for the latest available IMERG %s granule" % run_type,
+            fraction=IMERG_PHASE_BUDGET_FRACTION,
+        )
         candidate = target_date - timedelta(days=offset)
         probe_days_walked = offset
         try:
@@ -407,13 +545,21 @@ def _acquire_imerg_window(bounds, target_date, run_type, window_days,
 
     if latest_date is None:
         raise ValueError(
-            "no available IMERG %s observation within %d days before %s"
-            % (run_type, probe_limit, _day(target_date))
+            "no available IMERG %s observation in the %d candidate day(s) T-%d..T-%d "
+            "before %s (%s probe reach). IMERG %s publishes one granule per "
+            "observation day with ~%s latency, so a contiguous run of 404s means the "
+            "product is not serving these days for this account/AOI, not that a "
+            "single granule is missing."
+            % (run_type, probe_reach, first_offset, last_offset, _day(target_date),
+               probe_mode, run_type, _latency_label(run_type))
         )
 
     daily = [latest_value]
     for k in range(1, window_days):
-        deadline.check("fetching the IMERG %s antecedent window" % run_type)
+        deadline.check(
+            "fetching the IMERG %s antecedent window" % run_type,
+            fraction=IMERG_PHASE_BUDGET_FRACTION,
+        )
         day = latest_date - timedelta(days=k)
         daily.append(float(imerg_fetcher(session, day, bounds, run_type)))
 
@@ -422,6 +568,9 @@ def _acquire_imerg_window(bounds, target_date, run_type, window_days,
         "observation_date": latest_date,
         "daily": daily,
         "probe_days_walked": probe_days_walked,
+        "probe_first_offset": first_offset,
+        "probe_reach": probe_reach,
+        "probe_mode": probe_mode,
         "session_reused_probe_value": True,
     }
 
@@ -584,6 +733,9 @@ def _observed_record(state_name, bounds, target_date, run_type, window_days,
         "expires_in_seconds": round(float(ttl), 3),
         "observation_lag_days": lag_days,
         "probe_days_walked": acquired.get("probe_days_walked"),
+        "probe_first_offset": acquired.get("probe_first_offset"),
+        "probe_reach": acquired.get("probe_reach"),
+        "probe_mode": acquired.get("probe_mode"),
     }
     if source_kind == SOURCE_KIND_FALLBACK:
         record["note"] = FALLBACK_NOTE
@@ -622,6 +774,9 @@ def _unavailable_record(state_name, bounds, target_date, run_type, window_days,
         "expires_in_seconds": round(float(ttl), 3),
         "observation_lag_days": None,
         "probe_days_walked": None,
+        "probe_first_offset": None,
+        "probe_reach": None,
+        "probe_mode": None,
     }
     return record
 
@@ -684,7 +839,7 @@ def get_state_rainfall(state_name, target_date=None, run_type=DEFAULT_RUN_TYPE,
     try:
         acquired = _acquire_imerg_window(
             resolved_bounds, target_date, run_type, window_days,
-            imerg_fetcher, session_factory, deadline,
+            imerg_fetcher, session_factory, deadline, now=now,
         )
         attempts.append({"source_kind": SOURCE_KIND_IMERG, "status": "OK", "reason": None})
         ttl = cache_ttl_seconds()
