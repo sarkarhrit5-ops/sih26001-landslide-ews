@@ -40,6 +40,10 @@
       "bytes": 124437984,
       "sha256": "c25d9d88c6eb77993d4a00c738e5b1c690eaa1fcd28bbe5bdf8de2fc1d9dba7a"
     },
+    "meghalaya_osm.geojson": {
+      "bytes": 217488,
+      "sha256": "1b1dfc40ceadb929079bb072f0913c8f69116cb8ba75bce0ac851c1f0e39b1cc"
+    },
     "meghalaya_pilot_aspect.tif": {
       "bytes": 92400648,
       "sha256": "2cf1fead9f7a2aa4800e1b2f4ab9568ae262a686abb2f6160b9520759d0037e3"

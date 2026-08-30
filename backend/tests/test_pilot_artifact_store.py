@@ -389,14 +389,35 @@ def _env(**extra):
     return dict({"SIH_PILOT_ARTIFACT_BASE_URL": BASE}, **extra)
 
 
+def _osm_payload(state_name, repeat=4):
+    """
+    A GeoJSON body comfortably above the readers' > 100-byte gate.
+
+    Real assets, no fabrication concern: this is a test fixture for the TRANSPORT of the
+    file, not exposure data anything reads for a verdict.
+    """
+    feature = ('{"type":"Feature","properties":{"asset_name":"%s asset %%d",'
+               '"asset_type":"road"},"geometry":{"type":"Point",'
+               '"coordinates":[91.9,25.6]}}' % state_name)
+    features = ",".join(feature % index for index in range(repeat))
+    return ('{"type":"FeatureCollection","features":[%s]}' % features).encode("utf-8")
+
+
 def _wire(monkeypatch, tmp_path, states):
-    """Filesystem-backed pilots plus a store that holds exactly their artifacts."""
+    """Filesystem-backed pilots plus a store that holds exactly their artifacts.
+
+    A state the store wires an exposure GeoJSON for (Meghalaya) carries that object too:
+    it is part of that state's `missing` set, so a store without it would report
+    "incomplete" for a reason unrelated to whatever the test is actually about.
+    """
     root = _fake_root(tmp_path)
     pilots = {state: _FsPilot(PREFIXES[state], root) for state in states}
     _install_pilots(monkeypatch, pilots)
     payloads = {}
     for state in states:
         payloads.update(_payloads_for(PREFIXES[state]))
+        if state in pas.OSM_ARTIFACT_STATES:
+            payloads[pas.osm_artifact_filename(state)] = _osm_payload(state)
     return root, pilots, _Store(payloads)
 
 
@@ -457,7 +478,8 @@ def test_state_specific_selection_leaves_other_pilots_alone(monkeypatch, tmp_pat
     root, pilots, store = _wire(monkeypatch, tmp_path, states)
     report = _run(root, ["Meghalaya"], store)
     assert [r["state"] for r in report["results"]] == ["Meghalaya"]
-    assert all("meghalaya_pilot" in url for url in store.gets)
+    # "meghalaya", not "meghalaya_pilot": the exposure GeoJSON is meghalaya_osm.geojson.
+    assert all("meghalaya" in url for url in store.gets)
     assert pilots["Assam"].missing(root) != []
     assert pilots["Arunachal Pradesh"].missing(root) != []
 
@@ -816,11 +838,22 @@ def test_sikkim_alias_paths_come_from_risk_inputs_not_a_second_hard_coding(tmp_p
         assert aliases[feature].startswith(os.path.abspath(root))
 
 
-def test_only_sikkim_contributes_aliases(monkeypatch, tmp_path):
+def test_no_pilot_state_contributes_a_terrain_alias(monkeypatch, tmp_path):
+    """
+    Sikkim is the only state with TERRAIN twins. Meghalaya has exactly one alias and it
+    is the OSM exposure cache, never a raster -- so a one-pilot rollout still cannot
+    place a second raster name.
+    """
     root, _pilots, _store = _wire(monkeypatch, tmp_path, list(PREFIXES))
     for state_name in PREFIXES:
-        assert pas.artifact_wiring(state_name)["aliases"](root) == {}
-    assert pas.artifact_wiring(SIKKIM)["aliases"](root) != {}
+        aliases = pas.artifact_wiring(state_name)["aliases"](root)
+        assert set(aliases) <= {pas.OSM_EXPOSURE_FEATURE}
+        assert not any(path.endswith(".tif") for path in aliases.values())
+    assert pas.artifact_wiring("Assam")["aliases"](root) == {}
+    assert pas.artifact_wiring("Arunachal Pradesh")["aliases"](root) == {}
+    sikkim_aliases = pas.artifact_wiring(SIKKIM)["aliases"](root)
+    assert sorted(sikkim_aliases) == sorted(FEATURES)
+    assert all(path.endswith(".tif") for path in sikkim_aliases.values())
 
 
 def test_sikkim_missing_predicate_matches_the_published_paths(tmp_path):
@@ -971,28 +1004,34 @@ def _publish_module():
     return module
 
 
-def test_publisher_collects_five_objects_per_state_and_no_twins(monkeypatch, tmp_path):
+def test_publisher_collects_five_rasters_per_state_plus_one_geojson(monkeypatch,
+                                                                   tmp_path):
     """
-    20 objects, not 25: listing east_sikkim_dem.tif / real_*.tif would claim objects
-    exist in storage that were never uploaded.
+    21 objects, not 25 and not 26: listing east_sikkim_dem.tif / real_*.tif, or the
+    data/raw/osm/ twin, would claim objects exist in storage that were never uploaded.
     """
     publish = _publish_module()
     root, _pilots, _store = _wire(monkeypatch, tmp_path, list(PREFIXES))
     items = publish.collect(pas.PILOT_ARTIFACT_STATES, root)
-    assert len(items) == 20
+    assert len(items) == 21
     filenames = sorted(os.path.basename(path) for _s, _f, path in items)
-    assert len(set(filenames)) == 20
+    assert len(set(filenames)) == 21
+    assert len([n for n in filenames if n.endswith(".tif")]) == 20
+    assert [n for n in filenames if n.endswith(".geojson")] == ["meghalaya_osm.geojson"]
     assert sorted(n for n in filenames if n.startswith("sikkim_")) == \
         sorted(SIKKIM_PAYLOADS)
     for name in filenames:
         assert not name.startswith(("east_", "real_"))
+    # The one GeoJSON is Meghalaya's, and it sits directly under raw/ -- not raw/osm/.
+    osm = [path for _s, feature, path in items if feature == pas.OSM_EXPOSURE_FEATURE]
+    assert osm == [os.path.join(os.path.abspath(root), "raw", "meghalaya_osm.geojson")]
 
 
 def test_publisher_reports_the_runtime_alias_links(monkeypatch, tmp_path):
     publish = _publish_module()
     root, _pilots, _store = _wire(monkeypatch, tmp_path, list(PREFIXES))
     monkeypatch.setattr(publish, "artifact_wiring", pas.artifact_wiring)
-    assert publish.alias_report(list(PREFIXES), root) == []
+    assert publish.alias_report(["Assam", "Arunachal Pradesh"], root) == []
     rows = publish.alias_report([SIKKIM], root)
     mapping = {os.path.basename(alias): os.path.basename(published)
                for alias, published in rows}
@@ -1001,6 +1040,17 @@ def test_publisher_reports_the_runtime_alias_links(monkeypatch, tmp_path):
                        "real_aspect.tif": "sikkim_aspect.tif",
                        "real_roughness.tif": "sikkim_roughness.tif",
                        "real_tpi.tif": "sikkim_tpi.tif"}
+    # Meghalaya's single alias is the exposure cache twin, reported the same way and
+    # likewise carrying no manifest entry of its own.
+    meghalaya = publish.alias_report(["Meghalaya"], root)
+    assert [(os.path.basename(a), os.path.basename(p)) for a, p in meghalaya] == \
+        [("meghalaya_osm.geojson", "meghalaya_osm.geojson")]
+    alias_path, published_path = meghalaya[0]
+    assert alias_path == os.path.join(os.path.abspath(root), "raw", "osm",
+                                      "meghalaya_osm.geojson")
+    assert published_path == os.path.join(os.path.abspath(root), "raw",
+                                          "meghalaya_osm.geojson")
+    assert alias_path != published_path
 
 
 def _sikkim_items(root):
@@ -1302,3 +1352,319 @@ def test_no_whole_body_read_survives_in_the_source():
                 and node.func.attr == "iter_content":
             assert [kw.arg for kw in node.keywords] == ["chunk_size"], \
                 "iter_content must always be given a bounded chunk_size"
+
+
+# ---------------------------------------------------------------------------
+# MEGHALAYA'S OSM EXPOSURE GEOJSON -- the one non-raster artifact
+#
+# Three states' exposure files are committed; meghalaya_osm.geojson is not, so
+# state_validation reports Meghalaya exposure as missing on every instance. These tests
+# pin (a) that ONLY Meghalaya is wired this way, (b) that the delivery target and the
+# size gate are read off the READERS rather than restated here, (c) that the bytes travel
+# the identical streamed / SHA-256 / .part-then-os.replace path, and (d) that no request
+# path can trigger an Overpass query. No credentials, no network, no geopandas.
+# ---------------------------------------------------------------------------
+
+MEGHALAYA = "Meghalaya"
+OSM_FILENAME = "meghalaya_osm.geojson"
+
+
+def _read_source(*parts):
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", *parts))
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _function_source(source, name):
+    """
+    The source text of one function. state_validation imports pandas, which is absent
+    here, so its contract can only be pinned by reading it -- never by importing it.
+    """
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return "\n".join(lines[node.lineno - 1:node.end_lineno])
+    raise AssertionError("%s() not found" % name)
+
+
+def test_only_meghalaya_carries_an_osm_exposure_artifact(monkeypatch, tmp_path):
+    """
+    Adding an exposure object for a state whose GeoJSON is already committed would
+    publish a file that exists everywhere, for no gain -- and would change three working
+    states' behaviour.
+    """
+    root, _pilots, _store = _wire(monkeypatch, tmp_path, list(PREFIXES))
+    assert pas.OSM_ARTIFACT_STATES == (MEGHALAYA,)
+    for state_name in ("Assam", "Arunachal Pradesh", SIKKIM):
+        paths = pas.artifact_wiring(state_name)["paths"](root)
+        assert pas.OSM_EXPOSURE_FEATURE not in paths
+        assert not any(p.endswith(".geojson") for p in paths.values())
+        assert not any(p.endswith(".geojson")
+                       for _f, p in pas.artifact_wiring(state_name)["missing"](root))
+    paths = pas.artifact_wiring(MEGHALAYA)["paths"](root)
+    assert pas.OSM_EXPOSURE_FEATURE in paths
+    assert sorted(paths) == sorted(FEATURES + (pas.OSM_EXPOSURE_FEATURE,))
+    assert os.path.basename(paths[pas.OSM_EXPOSURE_FEATURE]) == OSM_FILENAME
+
+
+def test_the_delivery_target_is_the_path_state_validation_reads(tmp_path):
+    """
+    The whole point of the change: land the file where evaluate_exposure_data() looks.
+    Both the directory (data/raw) and the basename expression
+    (state_name.lower().replace(' ', '_') + "_osm.geojson") are asserted against that
+    function's own source, so a rename there fails this test instead of silently
+    delivering to a path nothing reads.
+    """
+    source = _read_source("app", "services", "state_validation.py")
+    body = _function_source(source, "evaluate_exposure_data")
+    assert "state_name.lower().replace(' ', '_')" in body
+    assert '"data", "raw", f"{clean_state_name}_osm.geojson"' in body
+
+    root = os.path.join(str(tmp_path), "data")
+    expected = os.path.join(root, "raw", OSM_FILENAME)
+    assert pas.osm_artifact_paths(MEGHALAYA, root) == \
+        {pas.OSM_EXPOSURE_FEATURE: expected}
+    # Derived, not hard-coded: a spaced state name is normalised the same way.
+    assert pas.osm_artifact_filename("Arunachal Pradesh") == \
+        "arunachal_pradesh_osm.geojson"
+    assert pas.osm_artifact_filename(MEGHALAYA) == OSM_FILENAME
+
+
+def test_the_size_gate_mirrors_the_readers_and_is_not_a_new_threshold(tmp_path):
+    """
+    evaluate_exposure_data and get_osm_assets both require getsize > 100. OSM_MIN_BYTES
+    exists to MIRROR that, not to change it: a 40-byte "{}" is missing to them, so it
+    must be missing here too, or this module would claim success for a file the dashboard
+    still calls Missing. Terrain keeps its own > 0 predicate, untouched.
+    """
+    validation = _read_source("app", "services", "state_validation.py")
+    exposure = _read_source("app", "services", "exposure.py")
+    assert "os.path.getsize(osm_path) > 100" in \
+        _function_source(validation, "evaluate_exposure_data")
+    assert "os.path.getsize(cache_path) > 100" in \
+        _function_source(exposure, "get_osm_assets")
+    assert pas.OSM_MIN_BYTES == 100
+
+    root = os.path.join(str(tmp_path), "data")
+    target = pas.osm_artifact_paths(MEGHALAYA, root)[pas.OSM_EXPOSURE_FEATURE]
+    assert pas.missing_osm_exposure(MEGHALAYA, root) == \
+        [(pas.OSM_EXPOSURE_FEATURE, target)]
+    _write(target, b"{}")                                    # 2 bytes: still missing
+    assert pas.missing_osm_exposure(MEGHALAYA, root) != []
+    _write(target, b"x" * 100)                               # exactly 100: still missing
+    assert pas.missing_osm_exposure(MEGHALAYA, root) != []
+    _write(target, b"x" * 101)                               # 101: present, as > 100
+    assert pas.missing_osm_exposure(MEGHALAYA, root) == []
+
+
+def test_the_alias_is_the_cache_get_osm_assets_checks_before_overpass(tmp_path):
+    """
+    Placing the same verified bytes at data/raw/osm/<state>_osm.geojson is what makes a
+    request-time Overpass query impossible: get_osm_assets returns the cache and never
+    touches the network. It is an alias of one object -- no second upload, no second
+    manifest entry.
+    """
+    exposure = _read_source("app", "services", "exposure.py")
+    body = _function_source(exposure, "get_osm_assets")
+    assert '"data", "raw", "osm"' in body
+    assert 'f"{clean_state_name}_osm.geojson"' in body
+
+    root = os.path.join(str(tmp_path), "data")
+    alias = pas.osm_alias_paths(MEGHALAYA, root)
+    published = pas.osm_artifact_paths(MEGHALAYA, root)
+    assert alias == {pas.OSM_EXPOSURE_FEATURE:
+                     os.path.join(root, "raw", "osm", OSM_FILENAME)}
+    assert alias[pas.OSM_EXPOSURE_FEATURE] != published[pas.OSM_EXPOSURE_FEATURE]
+    assert pas.artifact_wiring(MEGHALAYA)["aliases"](root) == alias
+    # An alias is never part of `missing`, so it can never become a fetched object.
+    assert alias[pas.OSM_EXPOSURE_FEATURE] not in [
+        p for _f, p in pas.missing_osm_exposure(MEGHALAYA, root)]
+
+
+def _called_names(source):
+    """Every function/attribute name that is actually CALLED in a module.
+
+    Parsed, not grepped: both files discuss mock_get_osm_assets and get_osm_assets in
+    prose (to say what must never be used, and where the real file comes from), so a
+    substring search would fail on documentation while missing a real call.
+    """
+    names = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                names.add(node.func.attr)
+    return names
+
+
+def test_no_delivery_code_touches_the_demo_fixture():
+    """
+    mock_get_osm_assets() returns two hardcoded points and is not exposure data at all.
+    Neither the store nor the publisher may call it -- nor get_osm_assets, which needs
+    geopandas and a live Overpass query. The real acquisition the publisher points an
+    operator at is acquire_state_osm.
+    """
+    store = _read_source("app", "services", "pilot_artifact_store.py")
+    publisher = _read_source("scripts", "publish_pilot_artifacts.py")
+    for source in (store, publisher):
+        called = _called_names(source)
+        assert "mock_get_osm_assets" not in called
+        assert "get_osm_assets" not in called
+        assert "acquire_state_osm" not in called
+    # It is named in the publisher's printed hint -- an instruction for a human, not a
+    # call this script makes.
+    assert "acquire_state_osm" in publisher
+    exposure = _read_source("app", "services", "exposure.py")
+    assert "TEST / DEMO FIXTURE ONLY" in _function_source(exposure,
+                                                          "mock_get_osm_assets")
+
+
+def test_meghalaya_fetch_places_the_geojson_at_both_reader_paths(monkeypatch, tmp_path):
+    """
+    End to end: the exact bytes land at data/raw/meghalaya_osm.geojson (what
+    state_validation reads) and at data/raw/osm/meghalaya_osm.geojson (what
+    get_osm_assets reads), from ONE object fetched by basename.
+    """
+    root, pilots, store = _wire(monkeypatch, tmp_path, [MEGHALAYA])
+    report = _run(root, [MEGHALAYA], store)
+    assert report["acted"] == 1 and report["failed"] == 0
+    assert report["results"][0]["status"] == "prepared"
+    assert pas.OSM_EXPOSURE_FEATURE in report["results"][0]["downloaded"]
+
+    body = store.payloads[OSM_FILENAME]
+    assert len(body) > pas.OSM_MIN_BYTES
+    published = os.path.join(os.path.abspath(root), "raw", OSM_FILENAME)
+    alias = os.path.join(os.path.abspath(root), "raw", "osm", OSM_FILENAME)
+    for path in (published, alias):
+        with open(path, "rb") as handle:
+            assert handle.read() == body
+    assert os.path.realpath(alias) == os.path.realpath(published)
+
+    # One object, requested once, by the basename the readers use.
+    assert store.gets.count("%s/%s" % (BASE, OSM_FILENAME)) == 1
+    assert len([u for u in store.gets if u.endswith(".geojson")]) == 1
+    # Both gates now report available, and the five rasters still landed.
+    assert pas.missing_osm_exposure(MEGHALAYA, root) == []
+    assert pas.artifact_wiring(MEGHALAYA)["missing"](root) == []
+    assert pilots[MEGHALAYA].missing(root) == []
+    assert [p for p in _all_files(root) if p.endswith(".part")] == []
+
+
+def test_an_already_present_geojson_is_not_re_downloaded(monkeypatch, tmp_path):
+    """Requirement 3 applies to exposure too: no repeat fetch on a warm instance."""
+    root, _pilots, store = _wire(monkeypatch, tmp_path, [MEGHALAYA])
+    for _feature, path in _paths_for(PREFIXES[MEGHALAYA], root).items():
+        _write(path)
+    _write(os.path.join(os.path.abspath(root), "raw", OSM_FILENAME),
+           store.payloads[OSM_FILENAME])
+    report = _run(root, [MEGHALAYA], store)
+    assert store.manifest_loads == [] and store.gets == []
+    assert [r["status"] for r in report["results"]] == ["already_present"]
+
+
+@pytest.mark.parametrize("mode,reason", [("truncate", "size mismatch"),
+                                         ("corrupt", "sha256 mismatch")])
+def test_unverifiable_geojson_never_promoted(monkeypatch, tmp_path, mode, reason):
+    """
+    A short or wrong-content GeoJSON above 100 bytes would read as Available at the
+    canonical path. It must fail verification in the .part file and leave BOTH reader
+    paths absent -- otherwise the alias would also make a bad cache authoritative.
+    """
+    root, _pilots, store = _wire(monkeypatch, tmp_path, [MEGHALAYA])
+    if mode == "truncate":
+        store.truncate = {OSM_FILENAME: 120}
+    else:
+        store.corrupt = {OSM_FILENAME}
+    report = _run(root, [MEGHALAYA], store)
+    published = os.path.join(os.path.abspath(root), "raw", OSM_FILENAME)
+    alias = os.path.join(os.path.abspath(root), "raw", "osm", OSM_FILENAME)
+    assert not os.path.exists(published)
+    assert not os.path.exists(alias)
+    assert reason in report["results"][0]["error"]
+    assert report["results"][0]["status"] == "incomplete"
+    assert (pas.OSM_EXPOSURE_FEATURE, published) in \
+        pas.artifact_wiring(MEGHALAYA)["missing"](root)
+    assert [p for p in _all_files(root) if p.endswith(".part")] == []
+    # The five rasters are not held hostage by the exposure failure.
+    assert sorted(report["results"][0]["downloaded"]) == sorted(FEATURES)
+
+
+def test_no_manifest_entry_for_the_geojson_reports_incomplete_honestly(monkeypatch,
+                                                                      tmp_path):
+    """
+    The live situation as of this change: the object is not published yet, so the store
+    has no verifiable entry for it. Meghalaya must then report "incomplete" with the real
+    reason -- never "prepared" -- while the terrain half still lands.
+    """
+    root, pilots, store = _wire(monkeypatch, tmp_path, [MEGHALAYA])
+    del store.payloads[OSM_FILENAME]          # absent from the manifest AND from storage
+    report = _run(root, [MEGHALAYA], store)
+    result = report["results"][0]
+    assert result["status"] == "incomplete"
+    assert "%s: no verifiable manifest entry" % OSM_FILENAME in result["error"]
+    assert not any(url.endswith(".geojson") for url in store.gets)
+    assert not os.path.exists(os.path.join(os.path.abspath(root), "raw", OSM_FILENAME))
+    assert not os.path.exists(os.path.join(os.path.abspath(root), "raw", "osm",
+                                           OSM_FILENAME))
+    assert sorted(result["downloaded"]) == sorted(FEATURES)
+    assert pilots[MEGHALAYA].missing(root) == []
+
+
+def test_no_request_path_can_trigger_an_osm_download():
+    """
+    acquire_state_osm() is the only function that may query Overpass, and it belongs to
+    the full 8-state sweep. The serve-time refresh a dashboard request reaches must use
+    the pure on-disk read (evaluate_exposure_data) -- otherwise every /validation/status
+    call could block on a live Overpass query.
+    """
+    routes = _read_source("app", "api", "routes.py")
+    # Exact call names, not substrings: routes.py legitimately calls the demo fixture
+    # mock_get_osm_assets(), whose name CONTAINS "get_osm_assets" but touches no network.
+    called = _called_names(routes)
+    for forbidden in ("acquire_state_osm", "get_osm_assets", "ensure_pilot_artifacts"):
+        assert forbidden not in called
+    assert "requests" not in called
+
+    validation = _read_source("app", "services", "state_validation.py")
+    # The serve-time refresh delegates the per-record work; both halves must stay
+    # on the pure on-disk read.
+    refresh = (_function_source(validation, "refresh_meghalaya_data_status")
+               + _function_source(validation, "_refresh_meghalaya_record"))
+    assert "evaluate_exposure_data" in refresh
+    assert "acquire_state_osm" not in refresh
+    assert "get_osm_assets" not in refresh
+
+    # And the store itself never calls the Overpass client: it only moves bytes.
+    store = _read_source("app", "services", "pilot_artifact_store.py")
+    assert "get_osm_assets" not in _called_names(store)
+
+
+def test_publisher_gates_the_geojson_on_100_bytes_and_rasters_on_zero(tmp_path):
+    """
+    The publisher's presence gate has to agree with the reader's, or the manifest gets an
+    entry for a file the dashboard still calls Missing.
+    """
+    publish = _publish_module()
+    assert publish.min_bytes_for(pas.OSM_EXPOSURE_FEATURE) == pas.OSM_MIN_BYTES == 100
+    for feature in FEATURES:
+        assert publish.min_bytes_for(feature) == 0
+
+    root = _fake_root(tmp_path)
+    target = pas.osm_artifact_paths(MEGHALAYA, root)[pas.OSM_EXPOSURE_FEATURE]
+    items = [(MEGHALAYA, pas.OSM_EXPOSURE_FEATURE, target)]
+
+    _write(target, b"x" * 80)                 # above zero, below the reader's gate
+    entries, missing = publish.build_manifest(items)
+    assert entries == {}
+    assert missing == items
+
+    body = b"y" * 200
+    _write(target, body)
+    entries, missing = publish.build_manifest(items)
+    assert missing == []
+    assert entries == {OSM_FILENAME: {"bytes": 200,
+                                      "sha256": hashlib.sha256(body).hexdigest()}}
+    ok, rows = publish.verify_manifest(entries, items)
+    assert ok is True and rows == [(OSM_FILENAME, None)]

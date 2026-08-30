@@ -22,6 +22,36 @@ WHY THIS EXISTS
 
     A streamed download holds one fixed-size buffer, so it cannot reproduce the OOM.
 
+ONE NON-RASTER ARTIFACT: MEGHALAYA'S OSM EXPOSURE GEOJSON
+    Terrain is not the only real input a fresh instance lacks. state_validation
+    .evaluate_exposure_data() reads exposure availability from
+
+        data/raw/<state>_osm.geojson        (state_name.lower().replace(' ', '_'))
+
+    and data/raw is .gitignored, but three of those files happen to be COMMITTED
+    (arunachal_pradesh_osm.geojson, assam_osm.geojson, sikkim_osm.geojson) while
+    meghalaya_osm.geojson is not -- so Meghalaya alone reports "Missing (Requires
+    Download)" on every instance. The alternative source is exposure.get_osm_assets(),
+    which needs geopandas plus a live Overpass query, so it cannot be relied on at
+    startup and must never be run per request; mock_get_osm_assets() is a demo fixture
+    and is not exposure data at all.
+
+    So exactly ONE extra object joins the manifest: Meghalaya's real OSM GeoJSON,
+    delivered through the identical streamed / SHA-256-verified / ".part"-then-
+    os.replace path as the rasters. Two things about it differ and are deliberate:
+
+      * THE SIZE GATE IS > 100 BYTES, not > 0. evaluate_exposure_data() and
+        get_osm_assets() both require getsize(path) > 100, so a 40-byte "{}" is missing
+        to them and must be missing here too. OSM_MIN_BYTES mirrors that threshold; it
+        does not change it.
+      * IT HAS AN ALIAS, data/raw/osm/<state>_osm.geojson -- the only path
+        get_osm_assets() consults before querying Overpass. Placing the same verified
+        bytes there (same _link_aliases mechanism Sikkim uses) is what guarantees no
+        request ever triggers a network OSM download.
+
+    Only Meghalaya is wired this way (OSM_ARTIFACT_STATES); the other three states'
+    exposure files already exist, and their terrain wiring is untouched.
+
 SIKKIM HAS TWO NAME FAMILIES FOR THE SAME FIVE RASTERS
     Sikkim was originally excluded here because its DEM was believed to be committed.
     It is not: `git ls-files '*.tif'` is empty, so a fresh deployment has no Sikkim
@@ -64,14 +94,16 @@ WHAT IT DOES NOT DO
       rasters and a symlink is placed at the canonical path. exists() / getsize() /
       rasterio.open() all follow symlinks, so no reader changes.
     * It does not run from a request handler. /api/v1/validation/status never downloads.
-    * It writes no .tif into Git (data/raw and data/processed are .gitignored).
+    * It writes nothing into Git: every path it creates lives under data/raw or
+      data/processed, both .gitignored -- the rasters and the OSM GeoJSON alike.
 
 TRUNCATION IS THE REAL RISK
-    missing_<state>_terrain_rasters() accepts any file with getsize(path) > 0, so a
-    download interrupted at 3 MB would read as "Available" and the predictor would fail
-    later on a corrupt raster. Hence: bytes always land in a sibling ".part" file, and
-    are promoted with os.replace ONLY after the byte count and SHA-256 both match a
-    manifest entry. An unverifiable artifact is never promoted.
+    missing_<state>_terrain_rasters() accepts any file with getsize(path) > 0 (and
+    evaluate_exposure_data() any GeoJSON over 100 bytes), so a download interrupted at
+    3 MB would read as "Available" and the predictor would fail later on a corrupt
+    raster. Hence: bytes always land in a sibling ".part" file, and are promoted with
+    os.replace ONLY after the byte count and SHA-256 both match a manifest entry. An
+    unverifiable artifact is never promoted.
 
 IDEMPOTENCE
     The work list is each prediction module's own missing_<state>_terrain_rasters() --
@@ -128,6 +160,7 @@ logger = logging.getLogger(__name__)
 
 # The four states whose terrain artifacts are absent from a fresh deployment. Sikkim is
 # here now because no .tif is tracked in Git either -- see the module docstring.
+# Meghalaya additionally lacks its OSM exposure GeoJSON (OSM_ARTIFACT_STATES below).
 PILOT_ARTIFACT_STATES = ("Assam", "Arunachal Pradesh", "Meghalaya", "Sikkim")
 
 SIKKIM_STATE_NAME = "Sikkim"
@@ -137,6 +170,20 @@ SIKKIM_STATE_NAME = "Sikkim"
 SIKKIM_DEM_FILENAME = "sikkim_dem.tif"
 SIKKIM_DERIVATIVE_PREFIX = "sikkim_"
 SIKKIM_DERIVATIVE_FEATURES = ("slope", "aspect", "roughness", "tpi")
+
+# --- OSM exposure (see "ONE NON-RASTER ARTIFACT" in the module docstring) ------------
+OSM_EXPOSURE_FEATURE = "osm_exposure"
+# ONLY Meghalaya. arunachal_pradesh_osm.geojson, assam_osm.geojson and
+# sikkim_osm.geojson are committed and present on every instance; meghalaya_osm.geojson
+# is not, which is why state_validation reports Meghalaya exposure as missing. Adding a
+# state here would publish an object that already exists locally, for no gain.
+OSM_ARTIFACT_STATES = ("Meghalaya",)
+# MIRRORS state_validation.evaluate_exposure_data / exposure.get_osm_assets, which both
+# require getsize(path) > 100 before calling exposure "Available". Deliberately NOT the
+# > 0 the terrain predicate uses: a 40-byte "{}" is missing to them, so it must be
+# missing here too, or this module would report success for a file they still reject.
+# This is a mirror of an existing threshold, never a change to one.
+OSM_MIN_BYTES = 100
 
 # The name the publisher (scripts/publish_pilot_artifacts.py) actually writes and that
 # was uploaded alongside the rasters. A bare "manifest.json" default made a fresh
@@ -359,19 +406,102 @@ def _sikkim_wiring():
     }
 
 
+def osm_artifact_filename(state_name):
+    """
+    The exposure GeoJSON basename for a state.
+
+    Derived with the SAME expression state_validation.evaluate_exposure_data and
+    exposure.get_osm_assets use -- state_name.lower().replace(' ', '_') + "_osm.geojson"
+    -- rather than hard-coded, so a downloaded file cannot land next to the path the
+    readers actually check.
+    """
+    return "%s_osm.geojson" % state_name.lower().replace(" ", "_")
+
+
+def osm_artifact_paths(state_name, data_dir=None):
+    """
+    {OSM_EXPOSURE_FEATURE: <root>/raw/<state>_osm.geojson} -- the exact path
+    state_validation.evaluate_exposure_data() reads exposure availability from.
+    """
+    return {OSM_EXPOSURE_FEATURE: os.path.join(_data_root(data_dir), "raw",
+                                               osm_artifact_filename(state_name))}
+
+
+def osm_alias_paths(state_name, data_dir=None):
+    """
+    {OSM_EXPOSURE_FEATURE: <root>/raw/osm/<state>_osm.geojson} -- exposure
+    .get_osm_assets()'s cache, the only path it consults before querying Overpass.
+
+    Placing the same verified bytes here is what makes a request-time OSM download
+    impossible: get_osm_assets finds the cache and returns without touching the network.
+    It is an alias, not a second object -- no extra upload and no extra manifest entry.
+    """
+    return {OSM_EXPOSURE_FEATURE: os.path.join(_data_root(data_dir), "raw", "osm",
+                                               osm_artifact_filename(state_name))}
+
+
+def missing_osm_exposure(state_name, data_dir=None):
+    """[(feature, path)] when the exposure GeoJSON is absent or too small to count.
+
+    Uses OSM_MIN_BYTES, mirroring the readers' own > 100 gate rather than the terrain
+    predicate's > 0 -- see the constant.
+    """
+    return [(feature, path)
+            for feature, path in sorted(osm_artifact_paths(state_name, data_dir).items())
+            if not (os.path.exists(path) and os.path.getsize(path) > OSM_MIN_BYTES)]
+
+
+def _with_osm_exposure(state_name, wiring):
+    """
+    Add a state's OSM exposure artifact to its terrain wiring.
+
+    Composition rather than modification: the terrain paths, the terrain predicate and
+    any terrain aliases are called through untouched and their results merged, so
+    Assam's, Arunachal's and Sikkim's behaviour is byte-identical to before (none of
+    them is in OSM_ARTIFACT_STATES) and Meghalaya's terrain half is unchanged. The
+    consequence worth stating: once the exposure file is part of Meghalaya's `missing`,
+    a run that places all five rasters but cannot verify the GeoJSON reports
+    "incomplete" instead of "prepared". That is the honest verdict -- exposure really is
+    still missing -- not a regression.
+    """
+    terrain_paths = wiring["paths"]
+    terrain_missing = wiring["missing"]
+    terrain_aliases = wiring["aliases"]
+
+    def _paths(data_dir=None):
+        merged = dict(terrain_paths(data_dir))
+        merged.update(osm_artifact_paths(state_name, data_dir))
+        return merged
+
+    def _missing(data_dir=None):
+        return list(terrain_missing(data_dir)) + missing_osm_exposure(state_name, data_dir)
+
+    def _aliases(data_dir=None):
+        merged = dict(terrain_aliases(data_dir))
+        merged.update(osm_alias_paths(state_name, data_dir))
+        return merged
+
+    return {"paths": _paths, "missing": _missing, "aliases": _aliases}
+
+
 def artifact_wiring(state_name):
     """
     {"paths", "missing", "aliases"} for one state.
 
     The three pilots delegate to their own prediction module (so the files written are
-    exactly the files read); Sikkim uses the local wiring above. Raises KeyError for an
-    unknown state.
+    exactly the files read); Sikkim uses the local wiring above. States in
+    OSM_ARTIFACT_STATES additionally carry their OSM exposure GeoJSON. Raises KeyError
+    for an unknown state.
     """
     if state_name == SIKKIM_STATE_NAME:
-        return _sikkim_wiring()
-    wiring = _load_pilot_module(state_name)
-    return {"paths": wiring["paths"], "missing": wiring["missing"],
-            "aliases": lambda data_dir=None: {}}
+        wiring = _sikkim_wiring()
+    else:
+        module = _load_pilot_module(state_name)
+        wiring = {"paths": module["paths"], "missing": module["missing"],
+                  "aliases": lambda data_dir=None: {}}
+    if state_name in OSM_ARTIFACT_STATES:
+        wiring = _with_osm_exposure(state_name, wiring)
+    return wiring
 
 
 def known_artifact_states():
@@ -651,7 +781,9 @@ def _discard(path):
 # ---------------------------------------------------------------------------
 def pilot_artifact_plan(data_dir=None, states=PILOT_ARTIFACT_STATES):
     """
-    Read-only: what each state is missing, per its OWN missing-raster predicate.
+    Read-only: what each state is missing, per its OWN availability predicate (the
+    prediction module's missing_<state>_terrain_rasters, plus the exposure gate for
+    states in OSM_ARTIFACT_STATES).
 
     Returns [{state, missing: [(feature, path)], dem_missing, error}]. Opens no raster
     and touches no network, so it is safe on every startup.
@@ -672,17 +804,22 @@ def pilot_artifact_plan(data_dir=None, states=PILOT_ARTIFACT_STATES):
 
 def _fetch_one(base_url, cache_dir, final_path, entry, fetcher, timeout, aliases=()):
     """
-    Materialise ONE raster at final_path. Returns (status, bytes) where status is
+    Materialise ONE artifact at final_path. Returns (status, bytes) where status is
     "cached" (already on the persistent disk and still matching the manifest) or
     "downloaded". Raises RuntimeError with the real reason on any failure.
 
     Bytes never touch final_path until they have been verified: they are streamed to a
     sibling ".part", checked against the manifest, then promoted with os.replace. This
-    is what stops a truncated download from satisfying the getsize(path) > 0 gate.
+    is what stops a truncated download from satisfying the availability gate the readers
+    apply (getsize > 0 for a raster, > OSM_MIN_BYTES for an exposure GeoJSON).
+
+    Nothing here is raster-specific: size and SHA-256 come from the manifest entry, so
+    Meghalaya's OSM GeoJSON travels this exact path.
 
     aliases are ADDITIONAL canonical paths that must resolve to the same verified bytes
-    (Sikkim's serving-name twins). They are linked only after verification succeeds, so
-    an unverifiable download cannot make an alias look available either.
+    (Sikkim's serving-name twins; Meghalaya's OSM cache twin). They are linked only
+    after verification succeeds, so an unverifiable download cannot make an alias look
+    available either.
     """
     filename = os.path.basename(final_path)
     target = cache_path_for(cache_dir, final_path)
@@ -729,7 +866,9 @@ def _link_aliases(target_path, aliases):
 
     A failure here is logged and swallowed: the published name is already in place, so
     downgrading it because a secondary name could not be linked would help nobody. The
-    alias simply stays absent and whatever reads it reports unavailable honestly.
+    alias simply stays absent and whatever reads it reports unavailable honestly. For
+    Meghalaya's OSM cache twin that means get_osm_assets() would fall back to Overpass
+    the next time the full sweep runs -- never on a request path.
     """
     for alias_path in aliases:
         try:
@@ -792,8 +931,9 @@ def _summarize(results, disabled=False, reason=None):
 def ensure_pilot_artifacts(data_dir=None, states=None, env=None,
                            fetcher=None, manifest_loader=None):
     """
-    Download the missing pilot terrain rasters from object storage. Idempotent, honest,
-    and never raises -- a deployment must come up even when storage is unreachable.
+    Download the missing pilot artifacts -- the terrain rasters, plus Meghalaya's OSM
+    exposure GeoJSON -- from object storage. Idempotent, honest, and never raises: a
+    deployment must come up even when storage is unreachable.
 
     Returns a report dict (see _summarize). fetcher/manifest_loader are injectable so
     the whole decision path is testable with no network and no storage credentials
@@ -820,11 +960,11 @@ def ensure_pilot_artifacts(data_dir=None, states=None, env=None,
     for entry in pilot_artifact_plan(data_dir=data_dir, states=selected):
         state_name = entry["state"]
         if entry["error"]:
-            logger.warning("[pilot-artifacts] %s: could not check terrain artifacts: %s",
+            logger.warning("[pilot-artifacts] %s: could not check artifacts: %s",
                            state_name, entry["error"])
             results.append(_result(state_name, [], "check_failed", entry["error"]))
         elif not entry["missing"]:
-            logger.info("[pilot-artifacts] %s: terrain artifacts already present, "
+            logger.info("[pilot-artifacts] %s: artifacts already present, "
                         "skipping.", state_name)
             results.append(_result(state_name, [], "already_present"))
         else:
@@ -893,8 +1033,9 @@ def ensure_pilot_artifacts(data_dir=None, states=None, env=None,
             except Exception as exc:
                 failures.append("%s: %s: %s" % (filename, type(exc).__name__, exc))
                 # Real error, traceback and all; the canonical path stays absent.
-                logger.exception("[pilot-artifacts] %s: could not retrieve %s; DEM "
-                                 "status will remain unavailable.", state_name, filename)
+                logger.exception("[pilot-artifacts] %s: could not retrieve %s; the "
+                                 "reader's status stays unavailable.",
+                                 state_name, filename)
                 continue
             result["bytes"] += size
             result["downloaded" if status == "downloaded" else "cached"].append(feature)
@@ -914,7 +1055,7 @@ def ensure_pilot_artifacts(data_dir=None, states=None, env=None,
                          state_name, result["status"], ", ".join(still_missing))
         else:
             result["status"] = "prepared"
-            logger.info("[pilot-artifacts] %s: terrain artifacts complete.", state_name)
+            logger.info("[pilot-artifacts] %s: artifacts complete.", state_name)
         results.append(result)
 
     return _summarize(results)

@@ -1,26 +1,38 @@
 """
-PUBLISH PILOT TERRAIN ARTIFACTS (host-only, one-off)
+PUBLISH PILOT ARTIFACTS (host-only, one-off)
 
-Companion to app/services/pilot_artifact_store.py. That module DOWNLOADS the five
-terrain rasters per state on a fresh deployment; this script prepares what it downloads
-from the copies that already exist on a machine that has run the prepare_* drivers.
+Companion to app/services/pilot_artifact_store.py. That module DOWNLOADS each state's
+artifacts on a fresh deployment; this script prepares what it downloads from the copies
+that already exist on a machine that has run the prepare_* drivers.
 
-Covers all FOUR states -- Assam, Arunachal Pradesh, Meghalaya and Sikkim -- i.e. 20
-objects. Sikkim contributes its published sweep-family names (sikkim_dem.tif,
-sikkim_<name>.tif); its byte-identical serving twins (east_sikkim_dem.tif,
-real_<name>.tif) are NOT separate objects and get no manifest entry, because the runtime
-places them as links to the same verified bytes. --verify prints that mapping.
+Covers all FOUR states -- Assam, Arunachal Pradesh, Meghalaya and Sikkim -- i.e. the 20
+terrain rasters, PLUS ONE non-raster object: Meghalaya's real OSM exposure GeoJSON
+(data/raw/meghalaya_osm.geojson). The other three states' OSM files are committed and
+present everywhere; Meghalaya's is not, which is why state_validation reports its
+exposure as missing on every instance. So the full publish set is 21 objects.
+
+That GeoJSON is produced by state_validation.acquire_state_osm() (real Overpass query
+via exposure.get_osm_assets; NEVER mock_get_osm_assets). Until it exists locally this
+script reports it under "NOT PRESENT LOCALLY" and writes NO manifest entry for it -- a
+manifest may only ever claim a digest of a file that is actually here.
+
+Sikkim contributes its published sweep-family names (sikkim_dem.tif, sikkim_<name>.tif);
+its byte-identical serving twins (east_sikkim_dem.tif, real_<name>.tif) are NOT separate
+objects and get no manifest entry, because the runtime places them as links to the same
+verified bytes. Meghalaya's OSM cache twin (data/raw/osm/meghalaya_osm.geojson, the only
+path exposure.get_osm_assets consults before querying Overpass) is an alias in exactly
+the same sense. --verify prints that mapping.
 
 It does two things and nothing else:
 
-  1. Hashes each local raster and writes a manifest -- {filename: {bytes, sha256}} --
+  1. Hashes each local artifact and writes a manifest -- {filename: {bytes, sha256}} --
      which is what lets the runtime reject a truncated or corrupted download instead of
      leaving a partial file where the dashboard reads availability.
   2. Prints the upload commands for the storage backend you name. It does NOT upload,
      because that needs credentials this repo must never contain.
 
 Nothing is written inside the repository tree except the manifest, and only when
---manifest points there. No .tif is copied, moved or staged for Git.
+--manifest points there. No .tif or .geojson is copied, moved or staged for Git.
 
 USAGE
     cd backend
@@ -37,7 +49,7 @@ pilot_artifact_store.DEFAULT_MANIFEST_NAME, i.e. "pilot_manifest.json". Publishi
 "manifest.json" makes every artifact fail with manifest_unavailable unless
 SIH_PILOT_ARTIFACT_MANIFEST is set to match.
 
-Then upload the 20 rasters plus the manifest to the same prefix, make them public-read,
+Then upload the artifacts plus the manifest to the same prefix, make them public-read,
 and set on the deployment:
 
     SIH_PILOT_ARTIFACT_BASE_URL=https://<your-public-prefix>
@@ -54,6 +66,8 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.pilot_artifact_store import (  # noqa: E402
+    OSM_EXPOSURE_FEATURE,
+    OSM_MIN_BYTES,
     PILOT_ARTIFACT_STATES,
     SIKKIM_STATE_NAME,
     artifact_wiring,
@@ -69,13 +83,19 @@ UPLOADERS = {
 
 
 def collect(states, data_dir=None):
-    """[(state, feature, path)] for all five rasters of each state, in a stable order.
+    """[(state, feature, path)] for every artifact of each state, in a stable order.
+
+    That is the five rasters per state, plus the OSM exposure GeoJSON for any state the
+    store wires one for (Meghalaya). The list comes from artifact_wiring()["paths"], i.e.
+    the SAME resolver the runtime downloads into, so this script cannot publish under a
+    name the runtime does not ask for.
 
     Sikkim contributes its PUBLISHED (sweep-family) names only -- sikkim_dem.tif and
     sikkim_<name>.tif. Its serving twins (east_sikkim_dem.tif, real_<name>.tif) are
     byte-identical locally, so uploading them again would double 245 MB for no gain;
-    the runtime places them as links to the same verified bytes instead. Listing them
-    here would claim objects exist in storage that do not.
+    the runtime places them as links to the same verified bytes instead. The same is
+    true of Meghalaya's OSM cache twin. Listing any of them here would claim objects
+    exist in storage that do not.
     """
     items = []
     for state_name in states:
@@ -86,7 +106,11 @@ def collect(states, data_dir=None):
 
 
 def alias_report(states, data_dir=None):
-    """[(alias_path, published_path)] for states that place extra links (Sikkim only)."""
+    """[(alias_path, published_path)] for states that place extra links.
+
+    Sikkim's five serving-name twins, and Meghalaya's data/raw/osm/ cache twin -- the
+    path exposure.get_osm_assets() checks before it would query Overpass.
+    """
     rows = []
     for state_name in states:
         wiring = artifact_wiring(state_name)
@@ -99,13 +123,26 @@ def alias_report(states, data_dir=None):
     return rows
 
 
+def min_bytes_for(feature):
+    """
+    The smallest size that counts as present for this artifact, mirroring whichever
+    reader gates on it: > 100 bytes for an OSM exposure GeoJSON
+    (state_validation.evaluate_exposure_data), > 0 for a raster.
+
+    Publishing a 40-byte GeoJSON would put an entry in the manifest for a file the
+    dashboard still calls Missing, so the two gates have to agree.
+    """
+    return OSM_MIN_BYTES if feature == OSM_EXPOSURE_FEATURE else 0
+
+
 def build_manifest(items):
     """Hash what is present; report what is not. Returns (entries, missing)."""
     entries = {}
     missing = []
     for state_name, feature, path in items:
         filename = os.path.basename(path)
-        if not (os.path.exists(path) and os.path.getsize(path) > 0):
+        if not (os.path.exists(path)
+                and os.path.getsize(path) > min_bytes_for(feature)):
             missing.append((state_name, feature, path))
             continue
         size = os.path.getsize(path)
@@ -174,7 +211,7 @@ def main(argv=None):
             print("  %-34s %s" % (filename, "OK" if reason is None else "FAIL: " + reason))
         aliases = alias_report(states, args.data_dir)
         if aliases:
-            print("\nServing-name links placed at runtime (NOT uploaded, no manifest "
+            print("\nAdditional links placed at runtime (NOT uploaded, no manifest "
                   "entry):")
             for alias_path, published_path in aliases:
                 print("  %-24s -> %s" % (os.path.basename(alias_path),
@@ -186,12 +223,21 @@ def main(argv=None):
     entries, missing = build_manifest(items)
 
     if missing:
-        # Honest partial output: publishing a manifest for a raster you do not have would
-        # make the runtime fail verification for no reason.
+        # Honest partial output: publishing a manifest for an artifact you do not have
+        # would make the runtime fail verification for no reason.
         print("\nNOT PRESENT LOCALLY (excluded from the manifest):")
         for state_name, feature, path in missing:
-            print("  %-20s %-10s %s" % (state_name, feature, path))
-        print("  Run scripts/prepare_<state>_terrain.py for these before publishing.")
+            print("  %-20s %-12s %s" % (state_name, feature, path))
+        if any(feature != OSM_EXPOSURE_FEATURE for _s, feature, _p in missing):
+            print("  Rasters: run scripts/prepare_<state>_terrain.py before publishing.")
+        if any(feature == OSM_EXPOSURE_FEATURE for _s, feature, _p in missing):
+            print("  OSM exposure: generate the REAL GeoJSON before publishing, e.g.")
+            print("    python -c \"from app.core.config_states import "
+                  "NER_STATES_CONFIG as C; "
+                  "from app.services.state_validation import acquire_state_osm as A; "
+                  "print(A('Meghalaya', C['Meghalaya']))\"")
+            print("  (real Overpass query via exposure.get_osm_assets; needs geopandas "
+                  "and network. NEVER mock_get_osm_assets.)")
 
     total = sum(entry["bytes"] for entry in entries.values())
     payload = {"artifacts": entries}
@@ -207,7 +253,7 @@ def main(argv=None):
 
     aliases = alias_report(states, args.data_dir)
     if aliases:
-        print("\nServing-name links placed at runtime (NOT uploaded, no manifest entry):")
+        print("\nAdditional links placed at runtime (NOT uploaded, no manifest entry):")
         for alias_path, published_path in aliases:
             print("  %-24s -> %s" % (os.path.basename(alias_path),
                                      os.path.basename(published_path)))
