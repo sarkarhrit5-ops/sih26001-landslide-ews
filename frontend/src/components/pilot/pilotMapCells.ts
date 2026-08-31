@@ -196,7 +196,7 @@ export type RainfallProvenanceTone = 'real' | 'fallback' | 'unavailable' | 'unre
 
 export interface RainfallProvenanceView {
   tone: RainfallProvenanceTone;
-  /** Short badge, e.g. "REAL / NASA IMERG" or "FALLBACK / Open-Meteo ERA5". */
+  /** Short badge, e.g. "REAL / NASA IMERG" or "RAINFALL SOURCE - ERA5 FALLBACK". */
   label: string;
   /** The producer's own source string, when it gave one. */
   source: string | null;
@@ -242,7 +242,7 @@ export function rainfallProvenanceTone(
 
 const TONE_LABELS: Record<RainfallProvenanceTone, string> = {
   real: 'REAL / NASA IMERG',
-  fallback: 'FALLBACK / Open-Meteo ERA5',
+  fallback: 'RAINFALL SOURCE - ERA5 FALLBACK',
   unavailable: 'UNAVAILABLE / no rainfall obtained',
   unreported: 'UNREPORTED rainfall provenance',
 };

@@ -41,13 +41,13 @@ export function NERMap({ entries, selectedStateId, onSelectState }: NERMapProps)
     if (!containerRef.current || mapRef.current) return;
     const map = L.map(containerRef.current, {
       zoomControl: false,
-      attributionControl: false,
+      attributionControl: true,
       minZoom: 5,
       maxZoom: 12,
     });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 18,
-      subdomains: 'abcd',
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     map.fitBounds(NER_FIT_BOUNDS);

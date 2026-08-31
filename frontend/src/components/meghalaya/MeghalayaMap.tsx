@@ -51,13 +51,13 @@ export function MeghalayaMap({ events, loaded, predictedCells }: MeghalayaMapPro
     if (!containerRef.current || mapRef.current) return;
     const map = L.map(containerRef.current, {
       zoomControl: false,
-      attributionControl: false,
+      attributionControl: true,
       minZoom: 7,
       maxZoom: 14,
     });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 18,
-      subdomains: 'abcd',
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     // The Meghalaya AOI spans ~1.8° in longitude and ~1° in latitude (East Khasi +

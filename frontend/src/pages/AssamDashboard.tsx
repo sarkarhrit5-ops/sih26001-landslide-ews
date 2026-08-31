@@ -230,16 +230,6 @@ function InfoRow({
   );
 }
 
-/**
- * How each of the 11 model features is sourced. The Assam pilot's single
- * methodological difference from Sikkim is that land_cover_class is REAL observed
- * ESA WorldCover (a categorical feature), NOT an elevation-derived proxy — so every
- * Assam feature is REAL.
- */
-function featureKind(_name: string): string {
-  return 'REAL';
-}
-
 function FeatureSchemaPanel({ schema }: { schema: AssamEvidenceResponse['feature_schema'] }) {
   if (!schema || !schema.feature_names?.length) {
     return (
@@ -273,19 +263,11 @@ function FeatureSchemaPanel({ schema }: { schema: AssamEvidenceResponse['feature
                 {dtype && (
                   <span className="font-mono text-[9px] uppercase text-slate-500">{dtype}</span>
                 )}
-                <ProvenanceTag status={featureKind(f)} source={schema.meaning?.[f]} />
               </span>
             </div>
           );
         })}
       </div>
-      {schema.meaning?.land_cover_class && (
-        <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
-          <span className="font-semibold text-emerald-300/90">land_cover_class</span> is REAL
-          observed land cover — ESA WorldCover sampled per cell and scored as a categorical feature
-          (not an elevation-derived proxy). {schema.meaning.land_cover_class}
-        </p>
-      )}
     </div>
   );
 }

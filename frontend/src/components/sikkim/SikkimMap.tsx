@@ -49,13 +49,13 @@ export function SikkimMap({ events, loaded, predictedCells }: SikkimMapProps) {
     if (!containerRef.current || mapRef.current) return;
     const map = L.map(containerRef.current, {
       zoomControl: false,
-      attributionControl: false,
+      attributionControl: true,
       minZoom: 7,
       maxZoom: 14,
     });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 18,
-      subdomains: 'abcd',
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     map.setView(AOI_CENTER, PILOT.zoom);

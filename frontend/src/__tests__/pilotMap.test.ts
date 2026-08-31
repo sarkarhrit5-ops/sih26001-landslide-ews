@@ -273,7 +273,7 @@ test('IMERG is claimed only when the payload says IMERG', () => {
 test('a fallback result is labelled FALLBACK, never REAL', () => {
   const byFlag = rainfallProvenanceView({ is_fallback: true, source: 'x' } as never);
   assert.equal(byFlag.tone, 'fallback');
-  assert.equal(byFlag.label, 'FALLBACK / Open-Meteo ERA5');
+  assert.equal(byFlag.label, 'RAINFALL SOURCE - ERA5 FALLBACK');
 
   assert.equal(
     rainfallProvenanceTone({ source_kind: 'OPEN_METEO_FALLBACK' } as never),

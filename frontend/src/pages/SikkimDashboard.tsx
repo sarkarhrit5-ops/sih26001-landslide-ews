@@ -271,18 +271,11 @@ function FeatureSchemaPanel({ schema }: { schema: SikkimEvidenceResponse['featur
                 {dtype && (
                   <span className="font-mono text-[9px] uppercase text-slate-500">{dtype}</span>
                 )}
-                <ProvenanceTag status={featureKind(f)} source={schema.meaning?.[f]} />
               </span>
             </div>
           );
         })}
       </div>
-      {schema.meaning?.land_cover_class && (
-        <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
-          <span className="font-semibold text-amber-300/90">land_cover_class</span> is a labelled
-          derived proxy — {schema.meaning.land_cover_class}
-        </p>
-      )}
     </div>
   );
 }

@@ -1,26 +1,17 @@
 /**
- * Rainfall provenance banner — shared by all four pilot consoles.
+ * Rainfall provenance banner - shared by all four pilot consoles.
  *
- * This replaces the old per-dashboard block that asserted "Real IMERG antecedent
- * rainfall." on every successful prediction. That sentence was unconditional, so
- * an Open-Meteo ERA5 fallback series was presented to the operator as an official
- * live NASA IMERG observation. This component instead reads what the response
- * actually reports and labels it accordingly:
- *
- *   REAL / NASA IMERG              data_quality_status=REAL or source_kind=IMERG
- *   FALLBACK / Open-Meteo ERA5     is_fallback, FALLBACK status, or OPEN_METEO_FALLBACK
- *   UNAVAILABLE                    the backend obtained no rainfall at all
- *   UNREPORTED                     the producer supplied no provenance to judge
- *
- * There is no code path here that prints a REAL/IMERG claim from missing data,
- * and no value is defaulted: an unreported field renders as "not reported".
- *
- * SCOPE: this banner describes the ANTECEDENT / MODEL rainfall (the T-1…T-14
- * window the prediction consumes), and says so on its first line. The separate
- * live monitoring read is rendered by LiveRainfallPanel; the two must never be
- * conflated, since a live half-hourly observation is not a model input.
+ * This component reads the rainfall provenance reported by the backend and
+ * presents the antecedent/model rainfall source used for the T-1...T-14 model
+ * feature window. It does not change source selection or data semantics.
  */
-import { AlertTriangle, CloudOff, CloudRain, HelpCircle } from 'lucide-react';
+import {
+  CloudOff,
+  CloudRain,
+  Database,
+  HelpCircle,
+  type LucideIcon,
+} from 'lucide-react';
 import type { PilotMapRainfallView, RainfallProvenanceBlock } from '../../services/api';
 import {
   formatCacheAge,
@@ -39,7 +30,7 @@ interface RainfallProvenanceBannerProps {
 /** Per-tone presentation. Colour never contradicts the label. */
 const TONE_STYLES: Record<
   RainfallProvenanceTone,
-  { border: string; bg: string; icon: string; title: string; Icon: typeof CloudRain }
+  { border: string; bg: string; icon: string; title: string; Icon: LucideIcon }
 > = {
   real: {
     border: 'border-emerald-800/70',
@@ -49,11 +40,11 @@ const TONE_STYLES: Record<
     Icon: CloudRain,
   },
   fallback: {
-    border: 'border-amber-800/70',
-    bg: 'bg-amber-950/40',
-    icon: 'text-amber-400',
-    title: 'text-amber-200',
-    Icon: AlertTriangle,
+    border: 'border-sky-800/70',
+    bg: 'bg-sky-950/35',
+    icon: 'text-sky-400',
+    title: 'text-sky-200',
+    Icon: Database,
   },
   unavailable: {
     border: 'border-rose-900/70',
@@ -90,6 +81,7 @@ export function RainfallProvenanceBanner({
   const Icon = style.Icon;
   const lag = formatObservationLag(view.observationLagDays);
   const cacheAge = formatCacheAge(view);
+  const supportedFallback = view.tone === 'fallback';
 
   return (
     <div
@@ -98,18 +90,31 @@ export function RainfallProvenanceBanner({
       <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${style.icon}`} />
       <div className="min-w-0 space-y-1.5">
         <div className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-          Antecedent / model rainfall · T-1…T-14 window
+          {supportedFallback
+            ? 'Rainfall source · ERA5 fallback'
+            : 'Antecedent / model rainfall · T-1...T-14 window'}
         </div>
         <div>
           <span className={`font-mono font-semibold uppercase tracking-wide ${style.title}`}>
-            {view.label}
+            {supportedFallback ? 'Open-Meteo ERA5' : view.label}
           </span>
-          {view.source ? <span className="text-slate-400"> · {view.source}</span> : null}
+          {view.source && !supportedFallback ? (
+            <span className="text-slate-400"> · {view.source}</span>
+          ) : null}
           {view.runType ? <span className="text-slate-500"> ({view.runType} run)</span> : null}
-          {view.windowDays != null ? (
+          {view.windowDays != null && !supportedFallback ? (
             <span className="text-slate-400"> · {view.windowDays}-day AOI-mean window</span>
           ) : null}
         </div>
+
+        {supportedFallback ? (
+          <>
+            <div className="text-slate-300">Used because near-real-time IMERG was unavailable.</div>
+            <div className="font-mono text-[10px] uppercase tracking-wide text-slate-400">
+              14-day antecedent rainfall · T-1...T-14
+            </div>
+          </>
+        ) : null}
 
         <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px]">
           <Field label="observed for" value={view.observationDate ?? 'not reported'} />
@@ -122,13 +127,17 @@ export function RainfallProvenanceBanner({
           ) : null}
         </div>
 
-        {view.note ? <div className="text-slate-400">{view.note}</div> : null}
+        {view.note && !supportedFallback ? <div className="text-slate-400">{view.note}</div> : null}
 
-        {view.fallbackWarning ? (
+        {supportedFallback ? (
+          <div className="text-sky-200/90">
+            IMERG was unavailable; ERA5 reanalysis is being used for the model rainfall features.
+          </div>
+        ) : view.fallbackWarning ? (
           <div className="font-medium text-amber-300">{view.fallbackWarning}</div>
         ) : null}
 
-        {view.caveats.length > 0 && (
+        {!supportedFallback && view.caveats.length > 0 && (
           <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-amber-200/90">
             {view.caveats.map((caveat) => (
               <li key={caveat}>{caveat}</li>

@@ -50,13 +50,13 @@ export function AssamMap({ events, loaded, predictedCells }: AssamMapProps) {
     if (!containerRef.current || mapRef.current) return;
     const map = L.map(containerRef.current, {
       zoomControl: false,
-      attributionControl: false,
+      attributionControl: true,
       minZoom: 7,
       maxZoom: 14,
     });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 18,
-      subdomains: 'abcd',
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     // The Assam AOI is wider in longitude (~2.4°) than Sikkim's, so it frames at a
