@@ -1226,3 +1226,433 @@ def test_an_unavailable_record_also_carries_the_cache_flag():
     assert record["freshness"]["cache_hit"] is False
     _clear()
 
+
+# ---------------------------------------------------------------------------
+# Open-Meteo rate-limit discipline (HTTP 429) and single-flight coalescing.
+#
+# Open-Meteo limits by CLIENT IP, so a 429 earned while serving one AOI is a
+# fact about the whole deployment. These tests pin that the cooldown is
+# provider-scoped, that a suppressed provider makes NO request at all, that a
+# 429 never becomes a faster retry, and that an armed cooldown still ends in an
+# honest UNAVAILABLE record with no fabricated zero.
+# ---------------------------------------------------------------------------
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+
+class _RateLimitedProviders(_CountingProviders):
+    """IMERG unpublished, and Open-Meteo answering HTTP 429."""
+
+    def __init__(self, retry_after=None, **kwargs):
+        _CountingProviders.__init__(self, **kwargs)
+        self.retry_after = retry_after
+
+    def fallback_fetcher(self, bounds, now_):
+        self.fallback_calls += 1
+        raise lr.OpenMeteoRateLimited(retry_after_seconds=self.retry_after)
+
+
+def _fallback_attempt(record):
+    for attempt in record["attempts"]:
+        if attempt["source_kind"] == lr.SOURCE_KIND_FALLBACK:
+            return attempt
+    raise AssertionError("no fallback attempt was recorded")
+
+
+def test_a_429_is_recorded_explicitly_and_arms_the_configured_cooldown():
+    _clear()
+    providers = _RateLimitedProviders()
+    record = lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=providers.granule_fetcher,
+        session_factory=_session_factory,
+        fallback_fetcher=providers.fallback_fetcher,
+        use_cache=False,
+    )
+    assert providers.fallback_calls == 1
+    attempt = _fallback_attempt(record)
+    assert attempt["outcome"] == lr.OUTCOME_RATE_LIMITED
+    assert "429" in attempt["detail"]
+    # No usable Retry-After -> the configured cooldown, not zero.
+    remaining = lr.fallback_cooldown_remaining()
+    assert remaining is not None
+    assert remaining > lr.DEFAULT_FALLBACK_COOLDOWN_SECONDS - 30.0
+    _clear()
+
+
+def test_a_429_still_yields_an_honest_unavailable_record_with_no_zero():
+    _clear()
+    providers = _RateLimitedProviders()
+    record = lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=providers.granule_fetcher,
+        session_factory=_session_factory,
+        fallback_fetcher=providers.fallback_fetcher,
+        use_cache=False,
+    )
+    assert record["data_quality_status"] == lr.QUALITY_UNAVAILABLE
+    assert record["latest_available_rainfall_mm"] is None
+    assert record["accum_3h_mm"] is None
+    assert record["accum_6h_mm"] is None
+    assert record["source_kind"] is None
+    assert record["unavailable_reason"]
+    _clear()
+
+
+def test_a_valid_retry_after_is_honoured_instead_of_the_default_cooldown():
+    _clear()
+    providers = _RateLimitedProviders(retry_after=120.0)
+    record = lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=providers.granule_fetcher,
+        session_factory=_session_factory,
+        fallback_fetcher=providers.fallback_fetcher,
+        use_cache=False,
+    )
+    assert _fallback_attempt(record)["outcome"] == lr.OUTCOME_RATE_LIMITED
+    assert "Retry-After honoured" in _fallback_attempt(record)["detail"]
+    remaining = lr.fallback_cooldown_remaining()
+    assert remaining is not None
+    # 120s asked for, and nothing longer invented.
+    assert 60.0 < remaining <= 120.0
+    _clear()
+
+
+def test_a_second_call_inside_the_cooldown_makes_zero_open_meteo_requests():
+    _clear()
+    first_providers = _RateLimitedProviders()
+    lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=first_providers.granule_fetcher,
+        session_factory=_session_factory,
+        fallback_fetcher=first_providers.fallback_fetcher,
+        use_cache=False,
+    )
+    assert first_providers.fallback_calls == 1
+
+    second_providers = _RateLimitedProviders()
+    record = lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=second_providers.granule_fetcher,
+        session_factory=_session_factory,
+        fallback_fetcher=second_providers.fallback_fetcher,
+        use_cache=False,
+    )
+    # Suppressed means suppressed: the fetcher was never entered.
+    assert second_providers.fallback_calls == 0
+    attempt = _fallback_attempt(record)
+    assert attempt["outcome"] == lr.OUTCOME_RATE_LIMITED_COOLDOWN
+    assert "no request was made" in attempt["detail"]
+    assert record["data_quality_status"] == lr.QUALITY_UNAVAILABLE
+    _clear()
+
+
+def test_a_429_on_one_state_suppresses_open_meteo_for_the_other_three():
+    _clear()
+    limited = _RateLimitedProviders()
+    lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=limited.granule_fetcher,
+        session_factory=_session_factory,
+        fallback_fetcher=limited.fallback_fetcher,
+        use_cache=False,
+    )
+    assert lr.fallback_cooldown_remaining() is not None
+
+    for state in ("Assam", "Arunachal Pradesh", "Meghalaya"):
+        healthy = _CountingProviders()
+        record = lr.get_latest_rainfall(
+            state,
+            now=NOW,
+            granule_fetcher=healthy.granule_fetcher,
+            session_factory=_session_factory,
+            fallback_fetcher=healthy.fallback_fetcher,
+            use_cache=False,
+        )
+        assert healthy.fallback_calls == 0, state
+        assert _fallback_attempt(record)["outcome"] == lr.OUTCOME_RATE_LIMITED_COOLDOWN
+        assert record["data_quality_status"] == lr.QUALITY_UNAVAILABLE, state
+        assert record["latest_available_rainfall_mm"] is None, state
+    _clear()
+
+
+def test_an_expired_cooldown_permits_exactly_one_further_fallback_call():
+    _clear()
+    # Armed an hour ago for the minimum span: long since expired.
+    lr._FALLBACK_COOLDOWN.arm(
+        lr.MIN_FALLBACK_COOLDOWN_SECONDS,
+        time.monotonic() - 3600.0,
+        reason="an earlier HTTP 429",
+    )
+    assert lr.fallback_cooldown_remaining() is None
+
+    healthy = _CountingProviders()
+    record = lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=healthy.granule_fetcher,
+        session_factory=_session_factory,
+        fallback_fetcher=healthy.fallback_fetcher,
+        use_cache=False,
+    )
+    assert healthy.fallback_calls == 1
+    assert record["data_quality_status"] == lr.QUALITY_FALLBACK
+    assert record["source_kind"] == lr.SOURCE_KIND_FALLBACK
+    _clear()
+
+
+def test_a_non_429_fallback_error_does_not_arm_the_cooldown():
+    _clear()
+
+    def exploding_fallback(bounds, now_):
+        raise RuntimeError("connection reset")
+
+    def unpublished(session, slot_start, bounds, run_type):
+        raise lr.GranuleUnavailable("not published")
+
+    record = lr.get_latest_rainfall(
+        "Sikkim",
+        now=NOW,
+        granule_fetcher=unpublished,
+        session_factory=_session_factory,
+        fallback_fetcher=exploding_fallback,
+        use_cache=False,
+    )
+    assert _fallback_attempt(record)["outcome"] == "error"
+    assert lr.fallback_cooldown_remaining() is None
+    _clear()
+
+
+def test_a_second_429_never_shortens_an_armed_cooldown():
+    _clear()
+    base = 10000.0
+    long_until = lr._FALLBACK_COOLDOWN.arm(1800.0, base, reason="first")
+    short_until = lr._FALLBACK_COOLDOWN.arm(60.0, base, reason="second")
+    assert short_until == long_until
+    assert lr._FALLBACK_COOLDOWN.reason() == "first"
+    # A genuinely longer span does extend it.
+    extended = lr._FALLBACK_COOLDOWN.arm(3600.0, base, reason="third")
+    assert extended > long_until
+    _clear()
+    assert lr.fallback_cooldown_remaining() is None
+
+
+def test_the_cooldown_span_is_clamped_to_the_sanctioned_bounds():
+    _clear()
+    # A fixed base, not time.monotonic(): float64 cannot represent
+    # (monotonic + 60) - monotonic exactly once the clock is large.
+    base = 10000.0
+    # Below the floor is raised to the floor; above the ceiling is capped.
+    assert lr._FALLBACK_COOLDOWN.arm(1.0, base) - base == (
+        lr.MIN_FALLBACK_COOLDOWN_SECONDS
+    )
+    lr._FALLBACK_COOLDOWN.clear()
+    assert lr._FALLBACK_COOLDOWN.arm(999999.0, base) - base == (
+        lr.MAX_FALLBACK_COOLDOWN_SECONDS
+    )
+    _clear()
+
+
+def test_the_configured_cooldown_default_and_env_override_stay_within_bounds():
+    previous = os.environ.get(lr.ENV_FALLBACK_COOLDOWN)
+    try:
+        os.environ.pop(lr.ENV_FALLBACK_COOLDOWN, None)
+        assert lr.fallback_cooldown_seconds() == lr.DEFAULT_FALLBACK_COOLDOWN_SECONDS
+
+        os.environ[lr.ENV_FALLBACK_COOLDOWN] = "600"
+        assert lr.fallback_cooldown_seconds() == 600.0
+
+        # Below the floor is REJECTED back to the default (the module's existing
+        # _env_number convention), never silently accepted as a shorter cooldown.
+        os.environ[lr.ENV_FALLBACK_COOLDOWN] = "1"
+        assert lr.fallback_cooldown_seconds() == lr.DEFAULT_FALLBACK_COOLDOWN_SECONDS
+
+        os.environ[lr.ENV_FALLBACK_COOLDOWN] = "not a number"
+        assert lr.fallback_cooldown_seconds() == lr.DEFAULT_FALLBACK_COOLDOWN_SECONDS
+
+        os.environ[lr.ENV_FALLBACK_COOLDOWN] = "999999"
+        assert lr.fallback_cooldown_seconds() == lr.MAX_FALLBACK_COOLDOWN_SECONDS
+    finally:
+        if previous is None:
+            os.environ.pop(lr.ENV_FALLBACK_COOLDOWN, None)
+        else:
+            os.environ[lr.ENV_FALLBACK_COOLDOWN] = previous
+
+
+def test_retry_after_parses_delta_seconds_and_http_dates_only():
+    from datetime import timezone
+    from email.utils import format_datetime
+
+    assert lr._parse_retry_after("30") == 30.0
+    assert lr._parse_retry_after(" 45 ") == 45.0
+    assert lr._parse_retry_after(None) is None
+    assert lr._parse_retry_after("") is None
+    assert lr._parse_retry_after("soon") is None
+    assert lr._parse_retry_after("0") is None
+    assert lr._parse_retry_after("-10") is None
+
+    now_utc = datetime.now(timezone.utc)
+    future = format_datetime(now_utc + timedelta(seconds=300))
+    parsed = lr._parse_retry_after(future)
+    assert parsed is not None and 240.0 < parsed <= 300.0
+    # An already-past HTTP-date must not become a zero-second cooldown.
+    past = format_datetime(now_utc - timedelta(seconds=300))
+    assert lr._parse_retry_after(past) is None
+
+
+def test_clear_cache_also_clears_the_provider_cooldown():
+    _clear()
+    lr._FALLBACK_COOLDOWN.arm(1800.0, time.monotonic(), reason="an earlier HTTP 429")
+    assert lr.fallback_cooldown_remaining() is not None
+    lr.clear_cache()
+    assert lr.fallback_cooldown_remaining() is None
+    lr._FALLBACK_COOLDOWN.arm(1800.0, time.monotonic(), reason="an earlier HTTP 429")
+    lr.clear_fallback_cooldown()
+    assert lr.fallback_cooldown_remaining() is None
+
+
+class _SlowProviders(_CountingProviders):
+    """
+    A counting provider whose fallback blocks, so the ORDER of two concurrent
+    callers is observable rather than incidental.
+    """
+
+    def __init__(self, delay=0.05, barrier=None, **kwargs):
+        _CountingProviders.__init__(self, **kwargs)
+        self._delay = delay
+        self._barrier = barrier
+        self._lock = threading.Lock()
+
+    def fallback_fetcher(self, bounds, now_):
+        with self._lock:
+            self.fallback_calls += 1
+        if self._barrier is not None:
+            # Times out (BrokenBarrierError) if the two callers were serialised.
+            self._barrier.wait(timeout=2.0)
+        else:
+            time.sleep(self._delay)
+        return _fallback_pairs(
+            NOW.replace(minute=0, second=0, microsecond=0), 8, mm=1.5
+        )
+
+
+def _run_threads(targets):
+    errors = []
+
+    def wrap(fn):
+        def runner():
+            try:
+                fn()
+            except BaseException as error:  # noqa: BLE001 - surfaced below
+                errors.append(error)
+
+        return runner
+
+    threads = [threading.Thread(target=wrap(fn)) for fn in targets]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10.0)
+    for thread in threads:
+        assert not thread.is_alive(), "a worker thread did not finish"
+    assert not errors, errors
+
+
+def test_concurrent_identical_calls_make_exactly_one_upstream_request():
+    _clear()
+    providers = _SlowProviders(delay=0.10)
+    records = []
+    records_lock = threading.Lock()
+
+    def call():
+        record = _call_state("Sikkim", providers)
+        with records_lock:
+            records.append(record)
+
+    _run_threads([call, call, call, call])
+
+    assert len(records) == 4
+    # One acquisition total, no matter how many dashboards refreshed at once.
+    assert providers.fallback_calls == 1
+    assert providers.imerg_calls > 0
+    flags = sorted(record["cache_hit"] for record in records)
+    assert flags == [False, True, True, True]
+    observed = {record["observed_at_utc"] for record in records}
+    assert len(observed) == 1
+    for record in records:
+        assert record["source_kind"] == lr.SOURCE_KIND_FALLBACK
+    _clear()
+
+
+def test_single_flight_does_not_serialise_distinct_states():
+    _clear()
+    barrier = threading.Barrier(2)
+    providers = _SlowProviders(barrier=barrier)
+    results = []
+    results_lock = threading.Lock()
+
+    def call(state):
+        def runner():
+            record = _call_state(state, providers)
+            with results_lock:
+                results.append((state, record))
+
+        return runner
+
+    # Both must be inside the fallback at the same time for the barrier to trip;
+    # a per-provider or global lock would break it and raise here.
+    _run_threads([call("Sikkim"), call("Assam")])
+
+    assert len(results) == 2
+    assert providers.fallback_calls == 2
+    for state, record in results:
+        assert record["cache_hit"] is False, state
+        assert record["source_kind"] == lr.SOURCE_KIND_FALLBACK, state
+    assert {state for state, _ in results} == {"Sikkim", "Assam"}
+    _clear()
+
+
+def test_concurrent_identical_calls_under_a_429_make_exactly_one_request():
+    _clear()
+
+    class _SlowRateLimited(_RateLimitedProviders):
+        def fallback_fetcher(self, bounds, now_):
+            self.fallback_calls += 1
+            time.sleep(0.10)
+            raise lr.OpenMeteoRateLimited(retry_after_seconds=self.retry_after)
+
+    providers = _SlowRateLimited()
+    outcomes = []
+    outcomes_lock = threading.Lock()
+
+    def call():
+        record = _call_state("Meghalaya", providers)
+        with outcomes_lock:
+            outcomes.append(record)
+
+    _run_threads([call, call, call, call])
+
+    # Four simultaneous panels, ONE 429 earned -- not four.
+    assert providers.fallback_calls == 1
+    for record in outcomes:
+        assert record["data_quality_status"] == lr.QUALITY_UNAVAILABLE
+        assert record["latest_available_rainfall_mm"] is None
+    assert lr.fallback_cooldown_remaining() is not None
+    _clear()
+
+
+def test_the_inflight_lock_table_does_not_leak_entries():
+    _clear()
+    providers = _CountingProviders()
+    for state in ("Sikkim", "Assam", "Arunachal Pradesh", "Meghalaya"):
+        _call_state(state, providers)
+    assert len(lr._INFLIGHT) == 0
+    _clear()
+

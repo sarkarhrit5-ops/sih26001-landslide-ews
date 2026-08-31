@@ -29,6 +29,17 @@ age stated. The two never mix.
   * ONE AOI subset per granule -- never one request per grid cell. Responses are
     streamed under a hard byte ceiling into a tempfile, parsed, and deleted; no
     NetCDF payload or raster is retained.
+  * FALLBACK RATE-LIMIT DISCIPLINE. Open-Meteo limits by client IP, so an HTTP 429
+    is a fact about this deployment rather than about one AOI. A 429 is raised as
+    OpenMeteoRateLimited, recorded explicitly in `attempts`, and arms a PROVIDER-
+    scoped cooldown (Retry-After when the provider supplied a usable one, else
+    fallback_cooldown_seconds()) that suppresses the fallback for all four pilot
+    AOIs. While it is armed no Open-Meteo request is made at all. This only ever
+    lowers the request rate; no retry is added and no interval is shortened, and a
+    suppressed provider still ends at UNAVAILABLE with no value.
+  * IDENTICAL CONCURRENT LOOKUPS ARE SINGLE-FLIGHTED. Two simultaneous requests
+    for the same state+AOI cost one acquisition; the second is served the first's
+    cache entry. Different AOIs are never serialised against each other.
 
 CONFIRMED PRODUCT FACTS (host .dds/.das/.dmr probe of GPM_3IMERGHHE.07):
   variable   precipitation
@@ -129,6 +140,16 @@ FALLBACK_CHUNK_BYTES = 16 * 1024
 FALLBACK_INTERVAL_MINUTES = 60
 FALLBACK_SOURCE_LABEL = "Open-Meteo hourly precipitation (FALLBACK)"
 
+# Open-Meteo rate-limits by CLIENT IP, not by coordinate. A 429 for one AOI is
+# therefore a statement about this deployment, not about Sikkim -- which is why
+# the cooldown below is provider-scoped and shared by all four pilot AOIs.
+HTTP_TOO_MANY_REQUESTS = 429
+
+# Attempt outcomes recorded for the fallback provider. Named constants because the
+# operator UI renders them verbatim and the tests assert on them.
+OUTCOME_RATE_LIMITED = "rate_limited"
+OUTCOME_RATE_LIMITED_COOLDOWN = "rate_limited_cooldown"
+
 # ---------------------------------------------------------------------------
 # Environment surface (read at CALL time, never at import time). Every name is
 # distinct from the antecedent service's SIH_RAINFALL_* knobs, so tuning the live
@@ -144,6 +165,7 @@ ENV_FALLBACK_ENABLED = "SIH_LIVE_RAINFALL_FALLBACK"
 ENV_LATE_ENABLED = "SIH_LIVE_RAINFALL_LATE"
 ENV_STALE_MINUTES = "SIH_LIVE_RAINFALL_STALE_MINUTES"
 ENV_NEAR_REAL_TIME_MINUTES = "SIH_LIVE_RAINFALL_NEAR_REAL_TIME_MINUTES"
+ENV_FALLBACK_COOLDOWN = "SIH_LIVE_RAINFALL_FALLBACK_COOLDOWN_SECONDS"
 
 DEFAULT_CACHE_TTL_SECONDS = 900.0        # half the 30-minute product cadence
 DEFAULT_NEGATIVE_TTL_SECONDS = 120.0     # a refusal must not stick around
@@ -153,6 +175,17 @@ DEFAULT_PROBE_GRANULES = 8               # 4 h of 30-minute steps
 DEFAULT_WINDOW_GRANULES = 12             # 6 h -> covers both accumulations
 DEFAULT_STALE_MINUTES = 360
 DEFAULT_NEAR_REAL_TIME_MINUTES = 90
+
+# How long the Open-Meteo provider is left alone after it answers 429 without a
+# usable Retry-After. One positive cache TTL: long enough that the four AOIs stop
+# generating traffic, short enough that a transient limit clears on its own. This
+# LOWERS the request rate; it is not a retry budget and never shortens one.
+DEFAULT_FALLBACK_COOLDOWN_SECONDS = 900.0
+# A provider-supplied Retry-After is honoured inside these bounds. The floor stops
+# a "Retry-After: 0" from defeating the cooldown; the ceiling stops one bad header
+# from disabling the fallback for a day.
+MIN_FALLBACK_COOLDOWN_SECONDS = 60.0
+MAX_FALLBACK_COOLDOWN_SECONDS = 3600.0
 
 def _env_number(name, default, minimum=0.0):
     raw = os.environ.get(name)
@@ -206,6 +239,20 @@ def window_granules():
 
 def fallback_enabled():
     return _env_flag(ENV_FALLBACK_ENABLED, True)
+
+
+def fallback_cooldown_seconds():
+    """
+    How long to leave Open-Meteo alone after an unqualified 429. Clamped to the
+    same bounds a provider-supplied Retry-After is clamped to, so an operator
+    cannot configure the cooldown away entirely.
+    """
+    configured = _env_number(
+        ENV_FALLBACK_COOLDOWN,
+        DEFAULT_FALLBACK_COOLDOWN_SECONDS,
+        minimum=MIN_FALLBACK_COOLDOWN_SECONDS,
+    )
+    return min(configured, MAX_FALLBACK_COOLDOWN_SECONDS)
 
 
 def late_enabled():
@@ -380,6 +427,142 @@ def _default_session_factory():
 
     return weather_ingestion.get_earthdata_session()
 
+
+class OpenMeteoRateLimited(Exception):
+    """
+    The Open-Meteo fallback answered HTTP 429.
+
+    Carried as its own type so _attempt_fallback can arm the shared cooldown for
+    this case ONLY. A timeout, a 500 or a malformed body must not silence the
+    provider for every state -- those are per-call failures, a 429 is not.
+
+    retry_after_seconds is the provider's own request when it supplied a usable
+    Retry-After, else None.
+    """
+
+    def __init__(self, retry_after_seconds=None):
+        self.retry_after_seconds = retry_after_seconds
+        if retry_after_seconds is None:
+            detail = "Open-Meteo returned HTTP 429 (no usable Retry-After header)"
+        else:
+            detail = "Open-Meteo returned HTTP 429, Retry-After %.0fs" % float(
+                retry_after_seconds
+            )
+        super().__init__(detail)
+
+
+def _parse_retry_after(raw):
+    """
+    Retry-After as a float number of seconds, or None when unusable.
+
+    RFC 9110 allows either delta-seconds or an HTTP-date. Both are accepted; an
+    absent, malformed, negative or already-past value returns None so the caller
+    falls back to the configured cooldown rather than to zero.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except (TypeError, ValueError):
+        seconds = None
+    if seconds is not None:
+        return seconds if seconds > 0.0 else None
+
+    try:
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(text)
+    except Exception:
+        return None
+    if when is None:
+        return None
+    try:
+        if when.tzinfo is not None:
+            when = when.astimezone(tz=None).replace(tzinfo=None)
+            reference = datetime.now()
+        else:
+            reference = _utcnow()
+        delta = (when - reference).total_seconds()
+    except Exception:
+        return None
+    return delta if delta > 0.0 else None
+
+
+class _FallbackCooldown:
+    """
+    A PROVIDER-scoped, monotonic cooldown gate for the Open-Meteo fallback.
+
+    Deliberately not keyed by state: Open-Meteo rate-limits by client IP, so a 429
+    raised while serving Sikkim is a fact about this deployment. Keying it per AOI
+    would let the other three pilots each re-earn the same 429 within seconds --
+    the exact behaviour that kept the Render instance rate-limited.
+
+    While armed, _attempt_fallback makes ZERO network calls and records
+    OUTCOME_RATE_LIMITED_COOLDOWN. This can only reduce the request rate; nothing
+    here shortens an interval or adds a retry.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._until = None
+        self._reason = None
+
+    def arm(self, seconds, monotonic, reason=None):
+        """Suppress the provider for `seconds`, clamped to the sanctioned bounds."""
+        span = max(
+            MIN_FALLBACK_COOLDOWN_SECONDS,
+            min(float(seconds), MAX_FALLBACK_COOLDOWN_SECONDS),
+        )
+        with self._lock:
+            candidate = monotonic + span
+            # Never shorten an existing cooldown: a second 429 must not become a
+            # way to get back to the provider sooner.
+            if self._until is None or candidate > self._until:
+                self._until = candidate
+                self._reason = reason
+            return self._until
+
+    def remaining(self, monotonic):
+        """Seconds left, or None when the provider may be called."""
+        with self._lock:
+            if self._until is None:
+                return None
+            left = self._until - monotonic
+            if left <= 0.0:
+                self._until = None
+                self._reason = None
+                return None
+            return left
+
+    def reason(self):
+        with self._lock:
+            return self._reason
+
+    def clear(self):
+        with self._lock:
+            self._until = None
+            self._reason = None
+
+
+_FALLBACK_COOLDOWN = _FallbackCooldown()
+
+
+def clear_fallback_cooldown():
+    """Re-permit Open-Meteo immediately (tests, and operator reset)."""
+    _FALLBACK_COOLDOWN.clear()
+
+
+def fallback_cooldown_remaining(monotonic=None):
+    """Seconds until Open-Meteo may be called again, or None if it may be now."""
+    import time as _time
+
+    return _FALLBACK_COOLDOWN.remaining(
+        _time.monotonic() if monotonic is None else monotonic
+    )
+
 def _default_fallback_fetcher(bounds, now):
     """
     Open-Meteo hourly precipitation at the AOI centroid -- the LABELLED fallback.
@@ -389,6 +572,10 @@ def _default_fallback_fetcher(bounds, now):
     returns hourly totals in mm (Open-Meteo's native unit for `precipitation`),
     so no rate conversion applies; the caller marks the record FALLBACK and sets
     interval_minutes to 60.
+
+    HTTP 429 is raised as OpenMeteoRateLimited, NOT as a generic HTTPError: the
+    caller has to be able to tell "the provider asked us to stop" apart from "the
+    provider is broken", because only the former arms the shared cooldown.
 
     Returns a list of (slot_start_utc, mm) pairs ordered oldest -> newest, past
     hours only. An empty list means "no usable value", which the caller turns
@@ -414,6 +601,13 @@ def _default_fallback_fetcher(bounds, now):
         stream=True,
     )
     try:
+        # Checked BEFORE raise_for_status so the rate-limit signal, and any
+        # Retry-After the provider volunteered, survive as structured data.
+        if getattr(response, "status_code", None) == HTTP_TOO_MANY_REQUESTS:
+            headers = getattr(response, "headers", None) or {}
+            raise OpenMeteoRateLimited(
+                retry_after_seconds=_parse_retry_after(headers.get("Retry-After"))
+            )
         response.raise_for_status()
         chunks = []
         total = 0
@@ -565,9 +759,64 @@ class LiveRainfallCache:
 _CACHE = LiveRainfallCache()
 
 
+class _KeyedLocks:
+    """
+    One lock per cache key, so identical concurrent lookups collapse into a single
+    upstream acquisition (a "single flight").
+
+    Scope is deliberately the CACHE KEY -- state + run type + rounded bounds --
+    and nothing coarser: four dashboards asking about four different AOIs must
+    still proceed in parallel. Only a second caller asking the SAME question waits,
+    and what it waits for is the first caller's cache entry, not a second fetch.
+
+    The map is reference-counted so it cannot grow without bound: the last waiter
+    to leave a key removes it.
+    """
+
+    def __init__(self):
+        self._guard = threading.Lock()
+        self._locks = {}
+
+    def acquire(self, key):
+        with self._guard:
+            entry = self._locks.get(key)
+            if entry is None:
+                entry = [threading.Lock(), 0]
+                self._locks[key] = entry
+            entry[1] += 1
+            lock = entry[0]
+        lock.acquire()
+        return lock
+
+    def release(self, key, lock):
+        lock.release()
+        with self._guard:
+            entry = self._locks.get(key)
+            if entry is None:
+                return
+            entry[1] -= 1
+            if entry[1] <= 0:
+                del self._locks[key]
+
+    def __len__(self):
+        with self._guard:
+            return len(self._locks)
+
+
+_INFLIGHT = _KeyedLocks()
+
+
 def clear_cache():
-    """Drop every cached live-rainfall record (tests, and operator reset)."""
+    """
+    Drop every cached live-rainfall record (tests, and operator reset).
+
+    The provider cooldown is cleared with it: both exist to suppress redundant
+    upstream work, and an operator reset that left Open-Meteo silenced would be
+    surprising. Nothing here fabricates or revives a value -- the next call
+    re-acquires from the sources or reports UNAVAILABLE.
+    """
     _CACHE.clear()
+    _FALLBACK_COOLDOWN.clear()
 
 
 def cache_key(state_name, bounds, run_type):
@@ -910,12 +1159,15 @@ def get_latest_rainfall(
 
     Every collaborator is injectable so the whole path is testable offline with
     no credentials and no network.
+
+    Concurrency: identical lookups are single-flighted (see _KeyedLocks), so four
+    dashboards refreshing the same state at the same moment cost ONE acquisition.
+    Distinct AOIs are never serialised against each other.
     """
     import time as _time
 
     resolved = resolve_bounds(state_name, bounds)
     fetch_clock = clock or _utcnow
-    fetched_at = now or fetch_clock()
     monotonic = _time.monotonic()
 
     store = cache if cache is not None else _CACHE
@@ -926,6 +1178,61 @@ def get_latest_rainfall(
             # store.get already handed back an independent deep-enough copy, so
             # stamping it cannot rewrite the cached observation timestamps.
             return _mark_cache_hit(cached, True)
+
+    acquire_kwargs = dict(
+        state_name=state_name,
+        resolved=resolved,
+        now=now,
+        fetch_clock=fetch_clock,
+        granule_fetcher=granule_fetcher,
+        session_factory=session_factory,
+        fallback_fetcher=fallback_fetcher,
+        include_late=include_late,
+        include_fallback=include_fallback,
+    )
+
+    if not (use_cache and store is not None):
+        # No cache to coalesce through: run directly, exactly as before.
+        return _acquire_record(monotonic=monotonic, **acquire_kwargs)
+
+    lock = _INFLIGHT.acquire(key)
+    try:
+        # Re-check under the key's lock: whoever we queued behind has just stored
+        # its result, and replaying that is what makes the second caller free.
+        monotonic = _time.monotonic()
+        cached = store.get(key, monotonic)
+        if cached is not None:
+            return _mark_cache_hit(cached, True)
+
+        record = _acquire_record(monotonic=monotonic, **acquire_kwargs)
+        store.put(key, record, monotonic)
+        return record
+    finally:
+        _INFLIGHT.release(key, lock)
+
+
+def _acquire_record(
+    state_name,
+    resolved,
+    now,
+    fetch_clock,
+    monotonic,
+    granule_fetcher,
+    session_factory,
+    fallback_fetcher,
+    include_late,
+    include_fallback,
+):
+    """
+    One acquisition through the full source ladder: IMERG Early -> IMERG Late ->
+    Open-Meteo FALLBACK -> UNAVAILABLE. Order and budget are unchanged; this is
+    the body get_latest_rainfall used to run inline, factored out so the caller
+    can run it under the single-flight lock.
+
+    Storing is the caller's job, because only the caller knows whether a cache is
+    in play.
+    """
+    fetched_at = now or fetch_clock()
 
     fetcher = granule_fetcher or _default_granule_fetcher
     make_session = session_factory or _default_session_factory
@@ -950,7 +1257,7 @@ def get_latest_rainfall(
     )
     if record is None and want_fallback:
         record = _attempt_fallback(
-            state_name, resolved, fetched_at, fall_back, attempts
+            state_name, resolved, fetched_at, fall_back, attempts, monotonic
         )
     if record is None:
         record = _unavailable_record(
@@ -963,8 +1270,6 @@ def get_latest_rainfall(
         )
 
     _mark_cache_hit(record, False)
-    if use_cache and store is not None:
-        store.put(key, record, monotonic)
     return record
 
 def _attempt_imerg_runs(
@@ -1043,7 +1348,9 @@ def _attempt_imerg_runs(
 
     return None
 
-def _attempt_fallback(state_name, bounds, fetched_at, fall_back, attempts):
+def _attempt_fallback(
+    state_name, bounds, fetched_at, fall_back, attempts, monotonic=None
+):
     """
     The LABELLED Open-Meteo fallback. data_quality_status is FALLBACK, never REAL,
     and the source string says FALLBACK too, so a downstream reader cannot mistake
@@ -1051,9 +1358,60 @@ def _attempt_fallback(state_name, bounds, fetched_at, fall_back, attempts):
 
     Its hours are 60 minutes wide, so a 3 h window needs 3 of them and a 6 h
     window needs 6 -- the same completeness rule, applied at the coarser cadence.
+
+    RATE-LIMIT DISCIPLINE. Open-Meteo limits by client IP, so the cooldown gate
+    consulted here is shared by all four pilot AOIs:
+      * armed  -> return immediately, ZERO network calls, outcome
+                  rate_limited_cooldown with the seconds remaining;
+      * a 429  -> arm the cooldown to Retry-After when the provider supplied a
+                  usable one, else to fallback_cooldown_seconds(), and record
+                  outcome rate_limited;
+      * any other failure -> unchanged generic `error`, cooldown NOT armed.
+    Either way the caller ends at UNAVAILABLE with no value: a suppressed provider
+    is a reason, never a substitute for an observation.
     """
+    import time as _time
+
+    if monotonic is None:
+        monotonic = _time.monotonic()
+
+    remaining = _FALLBACK_COOLDOWN.remaining(monotonic)
+    if remaining is not None:
+        reason = _FALLBACK_COOLDOWN.reason()
+        _record_attempt(
+            attempts,
+            SOURCE_KIND_FALLBACK,
+            OUTCOME_RATE_LIMITED_COOLDOWN,
+            "provider suppressed for a further %.0fs after %s; no request was made"
+            % (remaining, reason or "an earlier HTTP 429"),
+        )
+        return None
+
     try:
         pairs = fall_back(bounds, fetched_at)
+    except OpenMeteoRateLimited as limited:
+        requested = limited.retry_after_seconds
+        span = fallback_cooldown_seconds() if requested is None else float(requested)
+        _FALLBACK_COOLDOWN.arm(
+            span,
+            monotonic,
+            reason="HTTP 429 while serving %s" % (state_name or "an AOI"),
+        )
+        _record_attempt(
+            attempts,
+            SOURCE_KIND_FALLBACK,
+            OUTCOME_RATE_LIMITED,
+            "%s; provider suppressed for %.0fs (%s)"
+            % (
+                limited,
+                max(
+                    MIN_FALLBACK_COOLDOWN_SECONDS,
+                    min(span, MAX_FALLBACK_COOLDOWN_SECONDS),
+                ),
+                "Retry-After honoured" if requested is not None else "configured cooldown",
+            ),
+        )
+        return None
     except Exception as error:
         _record_attempt(attempts, SOURCE_KIND_FALLBACK, "error", error)
         return None
