@@ -17,10 +17,14 @@
  * assumed extent. Only the AOI constant and two labels differ, and both come from
  * the pilot registry.
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import type { LandslideEvent } from '../../services/api';
 import { getPilotConfig } from '../../data/nerStates';
+import { createBasemapLayer, setBasemapTheme } from '../pilot/basemap';
+import { DEFAULT_MAP_THEME } from '../pilot/mapTheme';
+import type { MapTheme } from '../pilot/mapTheme';
+import { MapThemeToggle } from '../common/MapThemeToggle';
 import {
   RISK_FILL,
   RISK_ORDER,
@@ -46,6 +50,9 @@ export function MeghalayaMap({ events, loaded, predictedCells }: MeghalayaMapPro
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
+  const baseLayerRef = useRef<L.TileLayer | null>(null);
+  /** Basemap theme is per-map local state: toggling here affects no other console. */
+  const [theme, setTheme] = useState<MapTheme>(DEFAULT_MAP_THEME);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -55,10 +62,8 @@ export function MeghalayaMap({ events, loaded, predictedCells }: MeghalayaMapPro
       minZoom: 7,
       maxZoom: 14,
     });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap contributors',
-    }).addTo(map);
+    const base = createBasemapLayer(DEFAULT_MAP_THEME).addTo(map);
+    baseLayerRef.current = base;
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     // The Meghalaya AOI spans ~1.8° in longitude and ~1° in latitude (East Khasi +
     // Jaintia Hills belt), so it frames at zoom 8 before the event-driven fitBounds
@@ -70,8 +75,14 @@ export function MeghalayaMap({ events, loaded, predictedCells }: MeghalayaMapPro
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
+      baseLayerRef.current = null;
     };
   }, []);
+
+  // Swap only the basemap treatment. No layer is rebuilt and no geometry moves.
+  useEffect(() => {
+    setBasemapTheme(baseLayerRef.current, theme);
+  }, [theme]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -175,6 +186,7 @@ export function MeghalayaMap({ events, loaded, predictedCells }: MeghalayaMapPro
   return (
     <div className="relative h-full w-full min-h-[440px] overflow-hidden rounded-xl border border-slate-800 bg-[#0b0f17]">
       <div ref={containerRef} className="h-full w-full min-h-[440px]" />
+      <MapThemeToggle theme={theme} onChange={setTheme} />
       <div className="pointer-events-none absolute bottom-4 left-4 z-[400] space-y-2 rounded-lg border border-slate-800 bg-slate-950/85 p-3 backdrop-blur">
         <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-slate-400">
           NASA GLC positives

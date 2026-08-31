@@ -7,10 +7,14 @@
  * Contains no risk/rainfall/susceptibility rendering — only real geography and
  * the validation status supplied by the parent from the live backend.
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import type { NerStateMeta, StateValidationTone } from '../../data/nerStates';
 import { EAST_SIKKIM_PILOT_AOI, NER_FIT_BOUNDS } from '../../data/nerStates';
+import { createBasemapLayer, setBasemapTheme } from '../pilot/basemap';
+import { DEFAULT_MAP_THEME } from '../pilot/mapTheme';
+import type { MapTheme } from '../pilot/mapTheme';
+import { MapThemeToggle } from '../common/MapThemeToggle';
 
 export interface NerMapEntry extends NerStateMeta {
   tone: StateValidationTone;
@@ -32,6 +36,9 @@ export function NERMap({ entries, selectedStateId, onSelectState }: NERMapProps)
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
+  const baseLayerRef = useRef<L.TileLayer | null>(null);
+  /** Basemap theme is per-map local state: toggling here affects no other console. */
+  const [theme, setTheme] = useState<MapTheme>(DEFAULT_MAP_THEME);
   // Keep the latest click handler without forcing the draw effect to re-run.
   const onSelectRef = useRef(onSelectState);
   onSelectRef.current = onSelectState;
@@ -45,10 +52,8 @@ export function NERMap({ entries, selectedStateId, onSelectState }: NERMapProps)
       minZoom: 5,
       maxZoom: 12,
     });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap contributors',
-    }).addTo(map);
+    const base = createBasemapLayer(DEFAULT_MAP_THEME).addTo(map);
+    baseLayerRef.current = base;
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     map.fitBounds(NER_FIT_BOUNDS);
     mapRef.current = map;
@@ -57,8 +62,14 @@ export function NERMap({ entries, selectedStateId, onSelectState }: NERMapProps)
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
+      baseLayerRef.current = null;
     };
   }, []);
+
+  // Swap only the basemap treatment. No layer is rebuilt and no geometry moves.
+  useEffect(() => {
+    setBasemapTheme(baseLayerRef.current, theme);
+  }, [theme]);
 
   // Redraw state geometry whenever entries / selection change.
   useEffect(() => {
@@ -133,6 +144,7 @@ export function NERMap({ entries, selectedStateId, onSelectState }: NERMapProps)
   return (
     <div className="relative h-full w-full min-h-[420px] overflow-hidden rounded-xl border border-slate-800 bg-[#0b0f17]">
       <div ref={containerRef} className="h-full w-full min-h-[420px]" />
+      <MapThemeToggle theme={theme} onChange={setTheme} />
       {/* Legend */}
       <div className="pointer-events-none absolute bottom-4 left-4 z-[400] space-y-2 rounded-lg border border-slate-800 bg-slate-950/85 p-3 backdrop-blur">
         <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-slate-400">

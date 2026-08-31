@@ -51,6 +51,39 @@
   background-color: #161c27 !important;
 }
 
+/*
+ * Basemap theme treatment (Dark / Light toggle).
+ *
+ * Both themes draw the SAME key-free OpenStreetMap tiles; Dark Mode is a filter
+ * applied to the tile layer's own container. Because Leaflet keeps overlays in
+ * separate panes, the filter reaches the basemap only — AOI rectangles, risk
+ * cells, markers, labels, tooltips, popups and controls render identically in
+ * both modes. The transition makes the swap a cross-fade rather than a flash.
+ */
+.brk-basemap {
+  transition: filter 320ms ease-in-out;
+  will-change: filter;
+}
+
+.brk-basemap--dark {
+  filter: invert(1) hue-rotate(180deg) brightness(0.86) contrast(0.92) saturate(0.62);
+}
+
+.brk-basemap--light {
+  filter: none;
+}
+
+/* Light basemap: keep the container backdrop from flashing near-black on pan. */
+.leaflet-container:has(.brk-basemap--light) {
+  background-color: #e8eaed !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brk-basemap {
+    transition: none;
+  }
+}
+
 /* Topographic Contour Background effect */
 .topo-contour-bg {
   background-image: radial-gradient(circle at 50% 50%, rgba(20, 30, 45, 0.5) 0%, rgba(10, 13, 18, 0.95) 100%),
