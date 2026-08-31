@@ -20,10 +20,28 @@ age stated. The two never mix.
     freshness_label / is_stale derived from that measured age by one shared
     rule. A FALLBACK observation is therefore exactly as auditable as an IMERG
     one; no source gets a null freshness.
-  * SOURCE ORDER: IMERG Early half-hourly -> IMERG Late half-hourly ->
-    Open-Meteo (labelled FALLBACK). If all three fail the record is UNAVAILABLE
+  * SOURCE ORDER: PPS IMERG Early half-hourly -> PPS IMERG Late half-hourly ->
+    GES DISC IMERG Early half-hourly -> GES DISC IMERG Late half-hourly ->
+    Open-Meteo (labelled FALLBACK). If everything fails the record is UNAVAILABLE
     and carries NO numbers: no zero fill, no imputation, no partial window
     presented as a whole one.
+  * PPS NEAR-REAL-TIME (jsimpsonhttps) is tried FIRST because it publishes NRT
+    granules the GES DISC OPeNDAP collection does not carry yet. It is a separate
+    provider in every respect: its own credentials (PPS_USERNAME/PPS_PASSWORD, or
+    PPS_EMAIL for both -- EARTHDATA_* does NOT authenticate jsimpsonhttps), its
+    own YYYYMM directory layout, its own V07C/.RT-H5 naming, and its own 429
+    cooldown. Granule existence is read from the monthly directory LISTING, so the
+    anchor is the newest slot the server actually names rather than a
+    latency guess. A PPS success is IMERG_HHR_EARLY_PPS / IMERG_HHR_LATE_PPS at
+    data_quality_status REAL -- never FALLBACK. Any PPS failure records its reason
+    and hands over to the GES DISC path with that path's behaviour unchanged.
+  * PPS AOI READS ARE RANGE HYPERSLABS UNDER A HARD CEILING. jsimpsonhttps is a
+    file server, not OPeNDAP: there is no server-side subsetting. The AOI window
+    is read out of the remote HDF5 through _HttpRangeReader, which counts every
+    byte and raises PPSAOIReadTooLarge at MAX_PPS_RANGE_BYTES. Nothing is written
+    to disk, no response body is buffered whole, and a granule whose chunk layout
+    would push the AOI read past the ceiling is ABANDONED in favour of GES DISC.
+    The ceiling is never widened and the full granule is never downloaded.
   * A 3 h or 6 h accumulation is reported ONLY when every granule in that window
     was retrieved. A short run yields null plus the real reason.
   * ONE AOI subset per granule -- never one request per grid cell. Responses are
@@ -48,10 +66,19 @@ CONFIRMED PRODUCT FACTS (host .dds/.das/.dmr probe of GPM_3IMERGHHE.07):
   grid       0.1 deg x 0.1 deg, lon 3600, lat 1800
   granules   48/day, directory YYYY/DDD, filename carries minutes-of-day
 
-Authentication is the EXISTING guard: weather_ingestion.get_earthdata_session().
-No second NASA client, no credential handling of its own. Everything external
-(granule_fetcher, session_factory, fallback_fetcher, clock, cache) is injectable,
-so the whole module is testable offline with no credentials and no network.
+GES DISC authentication is the EXISTING guard:
+weather_ingestion.get_earthdata_session(). PPS is a DIFFERENT host that guard does
+not cover, so it has its own minimal session factory reading PPS_USERNAME /
+PPS_PASSWORD (or PPS_EMAIL for both). Neither factory's credentials are logged or
+returned; only environment-variable NAMES ever appear in an error.
+
+The PPS attempt defaults ON exactly when those PPS variables are configured, so a
+deployment without them behaves precisely as it did before instead of recording a
+guaranteed auth failure on every call; SIH_LIVE_RAINFALL_PPS forces either state
+explicitly. Everything external (granule_fetcher, session_factory,
+fallback_fetcher, pps_granule_fetcher, pps_listing_fetcher, pps_session_factory,
+include_pps, clock, cache) is injectable, so the whole module is testable offline
+with no credentials and no network.
 
 Import-time work: none. No network call, no credential read, no cache warm.
 """
@@ -112,6 +139,72 @@ IMERG_PRODUCTS = {
 # 14 h observation is still a real IMERG measurement.
 IMERG_RUN_ORDER = (RUN_TYPE_EARLY, RUN_TYPE_LATE)
 
+# ---------------------------------------------------------------------------
+# PPS near-real-time surface (jsimpsonhttps). A SECOND NASA provider, tried
+# BEFORE GES DISC, with its own credentials, its own directory layout and its own
+# retrieval mechanism.
+#
+# jsimpsonhttps is a plain authenticated HTTPS file server with directory
+# listings. It is NOT an OPeNDAP server: there is no ?precipitation[...]
+# constraint and no .nc4 translation, so the GES DISC subsetting mechanism does
+# not apply here. The AOI subset is instead taken by an HTTP Range hyperslab read
+# of the remote HDF5 (see _HttpRangeReader), under a hard byte ceiling. Nothing is
+# written to disk and no full granule is ever fetched: if the granule's chunk
+# layout would make the AOI read exceed the ceiling, the read is ABANDONED and the
+# ladder falls through to the existing GES DISC path.
+# ---------------------------------------------------------------------------
+PPS_ROOT = "https://jsimpsonhttps.pps.eosdis.nasa.gov/imerg"
+PPS_RUN_DIRS = {RUN_TYPE_EARLY: "early", RUN_TYPE_LATE: "late"}
+
+# Host-confirmed NRT naming, e.g.
+#   3B-HHR-E.MS.MRG.3IMERG.20260831-S000000-E002959.0000.V07C.RT-H5
+# Version and suffix BOTH differ from GES DISC (V07B / .HDF5); the GES DISC
+# helpers above are therefore left exactly as they are.
+PPS_PRODUCT_VERSION = "V07C"
+PPS_GRANULE_SUFFIX = ".RT-H5"
+PPS_DATASET_PATH = "/Grid/precipitation"
+
+SOURCE_KIND_EARLY_PPS = "IMERG_HHR_EARLY_PPS"
+SOURCE_KIND_LATE_PPS = "IMERG_HHR_LATE_PPS"
+
+PPS_PRODUCTS = {
+    RUN_TYPE_EARLY: {
+        "granule_prefix": "3B-HHR-E",
+        "source_kind": SOURCE_KIND_EARLY_PPS,
+        "label": "NASA GPM IMERG Early half-hourly, PPS near-real-time (V07C)",
+        # Informational only. Discovery is listing-based, so this number never
+        # decides whether a slot exists.
+        "latency_minutes": 240,
+    },
+    RUN_TYPE_LATE: {
+        "granule_prefix": "3B-HHR-L",
+        "source_kind": SOURCE_KIND_LATE_PPS,
+        "label": "NASA GPM IMERG Late half-hourly, PPS near-real-time (V07C)",
+        "latency_minutes": 840,
+    },
+}
+PPS_RUN_ORDER = (RUN_TYPE_EARLY, RUN_TYPE_LATE)
+
+# The AOI hyperslab is a few hundred float32 cells. The ceiling is the SAME 2 MiB
+# the GES DISC subset uses, and it is a hard stop, never a soft target.
+MAX_PPS_RANGE_BYTES = 2 * 1024 * 1024
+PPS_RANGE_BLOCK_BYTES = 64 * 1024
+PPS_TIMEOUT_SECONDS = 30
+# A month of 30-minute listings is ~1440 filenames of ~70 bytes plus markup.
+MAX_PPS_LISTING_BYTES = 4 * 1024 * 1024
+PPS_LISTING_CHUNK_BYTES = 64 * 1024
+
+# Credentials come from the environment ONLY. PPS registration issues the same
+# e-mail address as both username and password, so PPS_EMAIL populates both when
+# the explicit pair is absent. Never logged, never echoed into a record.
+ENV_PPS_USERNAME = "PPS_USERNAME"
+ENV_PPS_PASSWORD = "PPS_PASSWORD"
+ENV_PPS_EMAIL = "PPS_EMAIL"
+
+# Recorded when the bounded AOI read had to be abandoned. Distinct from "error"
+# so the operator can tell a layout limitation from a broken provider.
+OUTCOME_CEILING_ABORT = "aoi_read_exceeds_ceiling"
+
 QUALITY_REAL = "REAL"
 QUALITY_FALLBACK = "FALLBACK"
 QUALITY_UNAVAILABLE = "UNAVAILABLE"
@@ -166,6 +259,8 @@ ENV_LATE_ENABLED = "SIH_LIVE_RAINFALL_LATE"
 ENV_STALE_MINUTES = "SIH_LIVE_RAINFALL_STALE_MINUTES"
 ENV_NEAR_REAL_TIME_MINUTES = "SIH_LIVE_RAINFALL_NEAR_REAL_TIME_MINUTES"
 ENV_FALLBACK_COOLDOWN = "SIH_LIVE_RAINFALL_FALLBACK_COOLDOWN_SECONDS"
+ENV_PPS_ENABLED = "SIH_LIVE_RAINFALL_PPS"
+ENV_PPS_COOLDOWN = "SIH_LIVE_RAINFALL_PPS_COOLDOWN_SECONDS"
 
 DEFAULT_CACHE_TTL_SECONDS = 900.0        # half the 30-minute product cadence
 DEFAULT_NEGATIVE_TTL_SECONDS = 120.0     # a refusal must not stick around
@@ -259,6 +354,45 @@ def late_enabled():
     return _env_flag(ENV_LATE_ENABLED, True)
 
 
+def pps_credentials_configured():
+    """
+    Whether PPS credentials are present in the environment. Reads only presence,
+    never a value, and never logs one.
+    """
+    username = os.environ.get(ENV_PPS_USERNAME)
+    password = os.environ.get(ENV_PPS_PASSWORD)
+    email = os.environ.get(ENV_PPS_EMAIL)
+    return bool((username and password) or email)
+
+
+def pps_enabled():
+    """
+    Whether the PPS near-real-time path is tried before GES DISC.
+
+    Default: ON exactly when PPS credentials are configured. PPS cannot be a
+    source of this deployment without them, so an unconfigured deployment behaves
+    precisely as it did before rather than logging a guaranteed auth failure on
+    every call. Setting SIH_LIVE_RAINFALL_PPS=1 forces the attempt anyway (which
+    surfaces the missing credentials as an explicit auth_unavailable attempt), and
+    SIH_LIVE_RAINFALL_PPS=0 disables it even when credentials exist.
+    """
+    return _env_flag(ENV_PPS_ENABLED, pps_credentials_configured())
+
+
+def pps_cooldown_seconds():
+    """
+    How long to leave PPS alone after an unqualified 429. Same bounds and same
+    only-ever-lowers-the-rate semantics as the Open-Meteo cooldown; a separate
+    gate because the two are different providers with different limits.
+    """
+    configured = _env_number(
+        ENV_PPS_COOLDOWN,
+        DEFAULT_FALLBACK_COOLDOWN_SECONDS,
+        minimum=MIN_FALLBACK_COOLDOWN_SECONDS,
+    )
+    return min(configured, MAX_FALLBACK_COOLDOWN_SECONDS)
+
+
 def stale_after_minutes():
     return _env_number(ENV_STALE_MINUTES, DEFAULT_STALE_MINUTES, minimum=1.0)
 
@@ -348,6 +482,146 @@ def granule_subset_url(run_type, slot_start, bounds):
     )
 
 
+# ---------------------------------------------------------------------------
+# PPS granule identity and discovery
+# ---------------------------------------------------------------------------
+def pps_directory_url(run_type, slot_start):
+    """
+    The PPS monthly directory for a slot: .../imerg/early/YYYYMM/
+
+    Deliberately NOT granule_directory_url's YYYY/DDD layout -- PPS groups NRT
+    granules by calendar month.
+    """
+    return "%s/%s/%s/" % (
+        PPS_ROOT,
+        PPS_RUN_DIRS[run_type],
+        slot_start.strftime("%Y%m"),
+    )
+
+
+def pps_granule_basename(run_type, slot_start):
+    """
+    The PPS NRT filename for a slot, e.g.
+      3B-HHR-E.MS.MRG.3IMERG.20260831-S000000-E002959.0000.V07C.RT-H5
+
+    Same S/E/minutes-of-day rule as the GES DISC name, different version and
+    suffix. Used for URL construction only -- existence is decided by the
+    listing, never by this string.
+    """
+    product = PPS_PRODUCTS[run_type]
+    slot_end = slot_start + timedelta(minutes=GRANULE_MINUTES) - timedelta(seconds=1)
+    return "%s.MS.MRG.3IMERG.%s-S%s-E%s.%04d.%s%s" % (
+        product["granule_prefix"],
+        slot_start.strftime("%Y%m%d"),
+        slot_start.strftime("%H%M%S"),
+        slot_end.strftime("%H%M%S"),
+        minutes_of_day(slot_start),
+        PPS_PRODUCT_VERSION,
+        PPS_GRANULE_SUFFIX,
+    )
+
+
+def pps_granule_url(run_type, slot_start, filename=None):
+    """Absolute URL of one PPS granule. `filename` wins so a listing-supplied
+    name (which may carry a version PPS has moved on to) is used verbatim."""
+    return "%s%s" % (
+        pps_directory_url(run_type, slot_start),
+        filename or pps_granule_basename(run_type, slot_start),
+    )
+
+
+def pps_parse_granule_name(name):
+    """
+    (slot_start, run_type) for a PPS HHR filename, or None if it is not one.
+
+    The slot start is read from the file's own -SHHMMSS field rather than from the
+    minutes-of-day sequence number, so a malformed sequence cannot shift an
+    observation timestamp.
+    """
+    import re
+
+    match = re.match(
+        r"^(3B-HHR-[EL])\.MS\.MRG\.3IMERG\."
+        r"(\d{8})-S(\d{6})-E(\d{6})\.(\d{4})\.(V\d+[A-Z]?)(\.RT-H5)$",
+        str(name or "").strip(),
+    )
+    if match is None:
+        return None
+    prefix, day, start, _end, _seq, _version, _suffix = match.groups()
+    try:
+        slot_start = datetime.strptime(day + start, "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    if slot_start != floor_to_granule(slot_start):
+        return None
+    for run_type, product in PPS_PRODUCTS.items():
+        if product["granule_prefix"] == prefix:
+            return slot_start, run_type
+    return None
+
+
+def pps_index_from_listing(body, run_type):
+    """
+    {slot_start: filename} for every HHR granule of `run_type` named in a PPS
+    directory listing body. Parsing the listing is what makes requirement 9
+    true: nothing here assumes a file exists.
+    """
+    index = {}
+    for token in _pps_listing_tokens(body):
+        parsed = pps_parse_granule_name(token)
+        if parsed is None:
+            continue
+        slot_start, parsed_run = parsed
+        if parsed_run != run_type:
+            continue
+        index[slot_start] = token
+    return index
+
+
+def _pps_listing_tokens(body):
+    """Candidate filenames in an Apache-style HTML or plain-text listing."""
+    import re
+
+    return re.findall(r"3B-HHR-[EL][^\s\"'<>]*?\.RT-H5", str(body or ""))
+
+
+def pps_latest_slot_at_or_before(index, now):
+    """
+    The newest published slot at or before the current observation slot
+    (requirement 10). Future-dated granules are ignored rather than trusted.
+    """
+    ceiling = floor_to_granule(now)
+    candidates = [slot for slot in index if slot <= ceiling]
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+class PPSRateLimited(Exception):
+    """PPS answered HTTP 429. Carries the provider's Retry-After when usable."""
+
+    def __init__(self, retry_after_seconds=None):
+        self.retry_after_seconds = retry_after_seconds
+        if retry_after_seconds is None:
+            detail = "PPS returned HTTP 429 (no usable Retry-After header)"
+        else:
+            detail = "PPS returned HTTP 429, Retry-After %.0fs" % float(
+                retry_after_seconds
+            )
+        super().__init__(detail)
+
+
+class PPSAOIReadTooLarge(Exception):
+    """
+    The bounded AOI hyperslab read would have exceeded MAX_PPS_RANGE_BYTES.
+
+    Raised INSTEAD of continuing, so a granule whose chunk layout makes an AOI
+    subset impossible costs a bounded number of range requests and then hands the
+    ladder to GES DISC. The ceiling is never widened and the full granule is never
+    fetched.
+    """
+
+
 class GranuleUnavailable(Exception):
     """
     A granule that is not published (HTTP 404). This is the ONLY condition that
@@ -417,6 +691,268 @@ def _default_granule_fetcher(session, slot_start, bounds, run_type):
             values = dataset[VARIABLE_NAME].values
     finally:
         os.remove(temp_path)
+
+    return float(weather_ingestion._mean_valid_precipitation(values))
+
+
+class _HttpRangeReader:
+    """
+    A minimal seekable, read-only file-like view of a remote HTTP object, served
+    by Range requests under a HARD cumulative byte ceiling.
+
+    This is what lets h5py read the AOI hyperslab out of a remote HDF5 without
+    downloading it: h5py seeks to the superblock, then to the dataset's b-tree,
+    then to just the bytes covering the requested lon/lat window. Every byte read
+    is counted; crossing `max_bytes` raises PPSAOIReadTooLarge instead of
+    continuing, which is the ceiling-abort the ladder falls through on.
+
+    Nothing is buffered whole: only the current block is held, and no file is ever
+    written to disk. `size` comes from Content-Length on the initial HEAD.
+    """
+
+    def __init__(self, session, url, size, max_bytes, block_bytes=None, timeout=None):
+        self._session = session
+        self._url = url
+        self._size = int(size)
+        self._max_bytes = int(max_bytes)
+        self._block = int(block_bytes or PPS_RANGE_BLOCK_BYTES)
+        self._timeout = PPS_TIMEOUT_SECONDS if timeout is None else timeout
+        self._pos = 0
+        self._bytes_read = 0
+        self._requests = 0
+        self._cache_start = None
+        self._cache = b""
+
+    # -- introspection used by the attempt trail and the tests ---------------
+    @property
+    def bytes_read(self):
+        return self._bytes_read
+
+    @property
+    def range_requests(self):
+        return self._requests
+
+    # -- file-like surface h5py needs ---------------------------------------
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def writable(self):
+        return False
+
+    def tell(self):
+        return self._pos
+
+    def seek(self, offset, whence=0):
+        if whence == 0:
+            target = int(offset)
+        elif whence == 1:
+            target = self._pos + int(offset)
+        elif whence == 2:
+            target = self._size + int(offset)
+        else:
+            raise ValueError("unsupported whence %r" % (whence,))
+        self._pos = max(0, target)
+        return self._pos
+
+    def read(self, length=-1):
+        if length is None or length < 0:
+            # An unbounded read is a full download by another name. Refused.
+            remaining = self._size - self._pos
+            if remaining > self._max_bytes:
+                raise PPSAOIReadTooLarge(
+                    "an unbounded read of %d bytes was requested from %s; refused"
+                    % (remaining, self._url)
+                )
+            length = remaining
+        length = min(int(length), max(0, self._size - self._pos))
+        if length <= 0:
+            return b""
+
+        out = bytearray()
+        while len(out) < length:
+            chunk = self._block_at(self._pos + len(out))
+            if not chunk:
+                break
+            want = length - len(out)
+            out.extend(chunk[:want])
+        self._pos += len(out)
+        return bytes(out)
+
+    def _block_at(self, position):
+        """Bytes at `position`, from the single cached block or a new Range GET."""
+        if (
+            self._cache_start is not None
+            and self._cache_start <= position < self._cache_start + len(self._cache)
+        ):
+            return self._cache[position - self._cache_start :]
+
+        start = position
+        end = min(self._size, start + self._block) - 1
+        if end < start:
+            return b""
+
+        span = end - start + 1
+        if self._bytes_read + span > self._max_bytes:
+            raise PPSAOIReadTooLarge(
+                "the AOI read of %s would exceed the %d byte ceiling after %d bytes "
+                "in %d range requests; abandoning rather than downloading the "
+                "granule" % (self._url, self._max_bytes, self._bytes_read, self._requests)
+            )
+
+        response = self._session.get(
+            self._url,
+            headers={"Range": "bytes=%d-%d" % (start, end)},
+            timeout=self._timeout,
+            stream=True,
+        )
+        try:
+            _raise_for_pps_status(response, self._url)
+            if response.status_code != 206:
+                # A 200 here means the server ignored the Range header and is
+                # about to hand us the whole file. Refuse it.
+                raise PPSAOIReadTooLarge(
+                    "PPS ignored the Range header for %s (HTTP %d); refusing a "
+                    "full-granule download" % (self._url, response.status_code)
+                )
+            payload = bytearray()
+            for piece in response.iter_content(PPS_RANGE_BLOCK_BYTES):
+                if not piece:
+                    continue
+                payload.extend(piece)
+                if len(payload) > span:
+                    raise PPSAOIReadTooLarge(
+                        "PPS returned more than the requested range for %s"
+                        % (self._url,)
+                    )
+        finally:
+            response.close()
+
+        self._requests += 1
+        self._bytes_read += len(payload)
+        self._cache_start = start
+        self._cache = bytes(payload)
+        return self._cache
+
+    def close(self):
+        self._cache = b""
+        self._cache_start = None
+
+
+def _raise_for_pps_status(response, url):
+    """Map PPS HTTP status onto the ladder's own vocabulary."""
+    status = int(getattr(response, "status_code", 0))
+    if status == 404:
+        raise GranuleUnavailable("PPS object is not published (HTTP 404): %s" % url)
+    if status in (401, 403):
+        raise PermissionError(
+            "PPS AUTHENTICATION REJECTED (HTTP %d) for %s. Check %s / %s (or %s); "
+            "EARTHDATA credentials do not authenticate jsimpsonhttps."
+            % (status, url, ENV_PPS_USERNAME, ENV_PPS_PASSWORD, ENV_PPS_EMAIL)
+        )
+    if status == HTTP_TOO_MANY_REQUESTS:
+        raise PPSRateLimited(
+            _parse_retry_after(getattr(response, "headers", {}).get("Retry-After"))
+        )
+    if status >= 400:
+        raise RuntimeError("PPS request failed (HTTP %d) for %s" % (status, url))
+
+
+def _default_pps_session_factory():
+    """
+    An authenticated PPS session built from the ENVIRONMENT ONLY.
+
+    PPS issues the registered e-mail address as both username and password, so
+    PPS_EMAIL populates both when the explicit pair is absent. Credentials are
+    never logged, never returned and never placed in a record; only the variable
+    NAMES appear in the error text.
+    """
+    import requests
+
+    username = os.environ.get(ENV_PPS_USERNAME)
+    password = os.environ.get(ENV_PPS_PASSWORD)
+    email = os.environ.get(ENV_PPS_EMAIL)
+    if not (username and password):
+        if email:
+            username = username or email
+            password = password or email
+    if not (username and password):
+        raise PermissionError(
+            "BLOCKER: Missing PPS near-real-time credentials. Set %s and %s (or %s). "
+            "EARTHDATA_* credentials do not authenticate jsimpsonhttps."
+            % (ENV_PPS_USERNAME, ENV_PPS_PASSWORD, ENV_PPS_EMAIL)
+        )
+
+    session = requests.Session()
+    session.auth = (username, password)
+    return session
+
+
+def _default_pps_listing_fetcher(session, run_type, slot_start):
+    """
+    The monthly PPS directory listing, streamed under MAX_PPS_LISTING_BYTES and
+    parsed into {slot_start: filename}. One request per run per call.
+    """
+    url = pps_directory_url(run_type, slot_start)
+    response = session.get(url, timeout=PPS_TIMEOUT_SECONDS, stream=True)
+    try:
+        _raise_for_pps_status(response, url)
+        body = bytearray()
+        for chunk in response.iter_content(PPS_LISTING_CHUNK_BYTES):
+            if not chunk:
+                continue
+            body.extend(chunk)
+            if len(body) > MAX_PPS_LISTING_BYTES:
+                raise RuntimeError(
+                    "PPS listing for %s exceeds the %d byte ceiling"
+                    % (url, MAX_PPS_LISTING_BYTES)
+                )
+    finally:
+        response.close()
+
+    return pps_index_from_listing(body.decode("utf-8", "replace"), run_type)
+
+
+def _default_pps_granule_fetcher(session, slot_start, bounds, run_type, filename=None):
+    """
+    The AOI mean precipitation RATE (mm/hr) for one PPS granule, taken by an HTTP
+    Range hyperslab read of the remote HDF5.
+
+    No temporary file, no response.content, no whole-granule download: h5py reads
+    through _HttpRangeReader, which counts every byte and raises
+    PPSAOIReadTooLarge at MAX_PPS_RANGE_BYTES. The AOI indices and the no-data
+    rule are the EXISTING ones, so a PPS value and a GES DISC value are computed
+    identically.
+    """
+    import h5py
+
+    from app.services import weather_ingestion
+
+    url = pps_granule_url(run_type, slot_start, filename)
+    head = session.head(url, timeout=PPS_TIMEOUT_SECONDS)
+    try:
+        _raise_for_pps_status(head, url)
+        size = head.headers.get("Content-Length")
+    finally:
+        close = getattr(head, "close", None)
+        if close is not None:
+            close()
+    if not size:
+        raise RuntimeError(
+            "PPS did not report Content-Length for %s; a bounded range read is "
+            "not possible" % url
+        )
+
+    lat_min, lat_max, lon_min, lon_max = weather_ingestion.get_imerg_indices(bounds)
+    reader = _HttpRangeReader(session, url, int(size), MAX_PPS_RANGE_BYTES)
+    try:
+        with h5py.File(reader, "r") as handle:
+            dataset = handle[PPS_DATASET_PATH]
+            values = dataset[0, lon_min : lon_max + 1, lat_min : lat_max + 1]
+    finally:
+        reader.close()
 
     return float(weather_ingestion._mean_valid_precipitation(values))
 
@@ -493,7 +1029,8 @@ def _parse_retry_after(raw):
 
 class _FallbackCooldown:
     """
-    A PROVIDER-scoped, monotonic cooldown gate for the Open-Meteo fallback.
+    A PROVIDER-scoped, monotonic cooldown gate (one instance per provider: see
+    _FALLBACK_COOLDOWN for Open-Meteo and _PPS_COOLDOWN for PPS).
 
     Deliberately not keyed by state: Open-Meteo rate-limits by client IP, so a 429
     raised while serving Sikkim is a fact about this deployment. Keying it per AOI
@@ -548,6 +1085,25 @@ class _FallbackCooldown:
 
 
 _FALLBACK_COOLDOWN = _FallbackCooldown()
+
+# A SECOND, independent instance for PPS. Same never-shortens, provider-scoped
+# semantics; separate state because a NASA rate limit and an Open-Meteo rate limit
+# are unrelated facts and must not silence each other.
+_PPS_COOLDOWN = _FallbackCooldown()
+
+
+def clear_pps_cooldown():
+    """Re-permit PPS immediately (tests, and operator reset)."""
+    _PPS_COOLDOWN.clear()
+
+
+def pps_cooldown_remaining(monotonic=None):
+    """Seconds until PPS may be called again, or None if it may be now."""
+    import time as _time
+
+    return _PPS_COOLDOWN.remaining(
+        _time.monotonic() if monotonic is None else monotonic
+    )
 
 
 def clear_fallback_cooldown():
@@ -817,6 +1373,7 @@ def clear_cache():
     """
     _CACHE.clear()
     _FALLBACK_COOLDOWN.clear()
+    _PPS_COOLDOWN.clear()
 
 
 def cache_key(state_name, bounds, run_type):
@@ -1079,6 +1636,184 @@ def _record_attempt(attempts, source_kind, outcome, detail=None):
     attempts.append(entry)
     return attempts
 
+def _acquire_pps_run(
+    session, bounds, run_type, now, fetcher, listing_fetcher, deadline
+):
+    """
+    Retrieve the newest PUBLISHED PPS granule for one run, then walk backwards
+    contiguously to cover the widest accumulation window.
+
+    The difference from _acquire_imerg_run is discovery: the anchor comes from the
+    monthly directory LISTING, not from a publication-latency guess, so "no
+    granule" means the server does not list one rather than "we looked in the
+    wrong place". A slot the listing does not name is a gap, exactly as an HTTP
+    404 is on the GES DISC path.
+
+    The window may cross a month boundary, so a second listing is fetched (once)
+    when the walk steps into the previous month.
+
+    Returns (anchor_slot, [interval_mm newest-first]) or None if nothing existed.
+    """
+    indexes = {}
+
+    def index_for(slot):
+        month = slot.strftime("%Y%m")
+        if month not in indexes:
+            indexes[month] = listing_fetcher(session, run_type, slot)
+        return indexes[month] or {}
+
+    anchor_index = index_for(now)
+    anchor = pps_latest_slot_at_or_before(anchor_index, now)
+    if anchor is None:
+        return None
+
+    anchor_rate = fetcher(session, anchor, bounds, run_type, anchor_index.get(anchor))
+    totals = [float(anchor_rate) * GRANULE_HOURS]
+
+    for step in range(1, max(1, window_granules())):
+        if deadline.expired():
+            break
+        slot = anchor - timedelta(minutes=GRANULE_MINUTES * step)
+        try:
+            listing = index_for(slot)
+        except Exception:
+            # A missing neighbouring month is a gap in the window, not a reason to
+            # discard the anchor observation we already hold.
+            break
+        filename = listing.get(slot)
+        if filename is None:
+            break
+        try:
+            rate = fetcher(session, slot, bounds, run_type, filename)
+        except GranuleUnavailable:
+            break
+        totals.append(float(rate) * GRANULE_HOURS)
+
+    return anchor, totals
+
+
+def _attempt_pps_runs(
+    state_name,
+    bounds,
+    fetched_at,
+    fetcher,
+    listing_fetcher,
+    make_session,
+    deadline,
+    attempts,
+    want_late,
+    monotonic=None,
+):
+    """
+    Try PPS Early, then PPS Late, BEFORE the GES DISC path.
+
+    Failure here is never terminal: every outcome is recorded and None is
+    returned, so the caller proceeds to GES DISC with its existing behaviour
+    intact (requirement 18). A PPS success is labelled IMERG_HHR_*_PPS at
+    QUALITY_REAL -- never FALLBACK.
+    """
+    import time as _time
+
+    runs = [RUN_TYPE_EARLY] + ([RUN_TYPE_LATE] if want_late else [])
+    clock = _time.monotonic() if monotonic is None else monotonic
+
+    cooling = _PPS_COOLDOWN.remaining(clock)
+    if cooling is not None:
+        for run_type in runs:
+            _record_attempt(
+                attempts,
+                PPS_PRODUCTS[run_type]["source_kind"],
+                OUTCOME_RATE_LIMITED_COOLDOWN,
+                "PPS is rate-limited; suppressed for a further %.0fs without a "
+                "request (%s)" % (cooling, _PPS_COOLDOWN.reason() or "no detail"),
+            )
+        return None
+
+    try:
+        session = make_session()
+    except Exception as auth_error:
+        _record_attempt(
+            attempts, SOURCE_KIND_EARLY_PPS, "auth_unavailable", auth_error
+        )
+        return None
+
+    for run_type in runs:
+        product = PPS_PRODUCTS[run_type]
+        if deadline.expired():
+            _record_attempt(
+                attempts, product["source_kind"], "skipped_deadline_exhausted"
+            )
+            continue
+        try:
+            outcome = _acquire_pps_run(
+                session, bounds, run_type, fetched_at, fetcher, listing_fetcher, deadline
+            )
+        except PermissionError as auth_error:
+            # One credential, one verdict: retrying Late would be certain to fail.
+            _record_attempt(
+                attempts, product["source_kind"], "auth_rejected", auth_error
+            )
+            return None
+        except PPSRateLimited as limited:
+            span = limited.retry_after_seconds
+            if span is None:
+                span = pps_cooldown_seconds()
+            _PPS_COOLDOWN.arm(span, clock, str(limited))
+            _record_attempt(
+                attempts, product["source_kind"], OUTCOME_RATE_LIMITED, limited
+            )
+            return None
+        except PPSAOIReadTooLarge as too_large:
+            # The ceiling held. Hand over to GES DISC rather than widening it.
+            _record_attempt(
+                attempts, product["source_kind"], OUTCOME_CEILING_ABORT, too_large
+            )
+            continue
+        except GranuleUnavailable as missing:
+            _record_attempt(
+                attempts, product["source_kind"], "no_published_granule", missing
+            )
+            continue
+        except Exception as error:
+            _record_attempt(attempts, product["source_kind"], "error", error)
+            continue
+
+        if outcome is None:
+            _record_attempt(
+                attempts,
+                product["source_kind"],
+                "no_published_granule",
+                "the PPS monthly listing names no granule at or before the "
+                "current 30-minute slot",
+            )
+            continue
+
+        anchor, totals = outcome
+        _record_attempt(
+            attempts,
+            product["source_kind"],
+            "ok",
+            "anchor %s, %d contiguous granules" % (_iso(anchor), len(totals)),
+        )
+        return _observed_record(
+            state_name=state_name,
+            bounds=bounds,
+            observed_at=anchor,
+            fetched_at=fetched_at,
+            interval_mm=totals[0],
+            interval_minutes=GRANULE_MINUTES,
+            interval_totals_newest_first=totals,
+            source=product["label"],
+            source_kind=product["source_kind"],
+            data_quality_status=QUALITY_REAL,
+            expected_latency_minutes=product["latency_minutes"],
+            attempts=attempts,
+            granules_used=len(totals),
+        )
+
+    return None
+
+
 def _acquire_imerg_run(session, bounds, run_type, now, fetcher, deadline):
     """
     Retrieve the newest published granule for one IMERG run, then walk backwards
@@ -1145,13 +1880,20 @@ def get_latest_rainfall(
     use_cache=True,
     include_late=None,
     include_fallback=None,
+    pps_granule_fetcher=None,
+    pps_listing_fetcher=None,
+    pps_session_factory=None,
+    include_pps=None,
 ):
     """
     The LATEST AVAILABLE sub-daily rainfall for a pilot AOI, with its age stated.
 
-    Source order: IMERG Early HHR -> IMERG Late HHR -> Open-Meteo (FALLBACK) ->
-    UNAVAILABLE. Every attempt is recorded in `attempts`, so a FALLBACK record
-    always says what failed before it.
+    Source order: PPS IMERG Early HHR -> PPS IMERG Late HHR -> GES DISC IMERG
+    Early HHR -> GES DISC IMERG Late HHR -> Open-Meteo (FALLBACK) -> UNAVAILABLE.
+    Every attempt is recorded in `attempts`, so a FALLBACK record always says what
+    failed before it. The PPS phase is skipped (recording nothing) when no PPS
+    credentials are configured and include_pps / SIH_LIVE_RAINFALL_PPS do not force
+    it, so an unconfigured deployment behaves exactly as it did before.
 
     This function is NOT a source of model features. It is unreachable from
     derive_rainfall_features(), it does not import rainfall_service, and its
@@ -1189,6 +1931,10 @@ def get_latest_rainfall(
         fallback_fetcher=fallback_fetcher,
         include_late=include_late,
         include_fallback=include_fallback,
+        pps_granule_fetcher=pps_granule_fetcher,
+        pps_listing_fetcher=pps_listing_fetcher,
+        pps_session_factory=pps_session_factory,
+        include_pps=include_pps,
     )
 
     if not (use_cache and store is not None):
@@ -1222,12 +1968,19 @@ def _acquire_record(
     fallback_fetcher,
     include_late,
     include_fallback,
+    pps_granule_fetcher=None,
+    pps_listing_fetcher=None,
+    pps_session_factory=None,
+    include_pps=None,
 ):
     """
-    One acquisition through the full source ladder: IMERG Early -> IMERG Late ->
-    Open-Meteo FALLBACK -> UNAVAILABLE. Order and budget are unchanged; this is
-    the body get_latest_rainfall used to run inline, factored out so the caller
-    can run it under the single-flight lock.
+    One acquisition through the full source ladder: PPS IMERG Early -> PPS IMERG
+    Late -> GES DISC IMERG Early -> GES DISC IMERG Late -> Open-Meteo FALLBACK ->
+    UNAVAILABLE.
+
+    PPS is tried first because it publishes NRT granules the GES DISC OPeNDAP
+    collection does not carry yet. It runs inside the SAME _Deadline, so the total
+    budget is unchanged; the GES DISC and Open-Meteo phases below are untouched.
 
     Storing is the caller's job, because only the caller knows whether a cache is
     in play.
@@ -1237,24 +1990,43 @@ def _acquire_record(
     fetcher = granule_fetcher or _default_granule_fetcher
     make_session = session_factory or _default_session_factory
     fall_back = fallback_fetcher or _default_fallback_fetcher
+    pps_fetcher = pps_granule_fetcher or _default_pps_granule_fetcher
+    pps_listing = pps_listing_fetcher or _default_pps_listing_fetcher
+    make_pps_session = pps_session_factory or _default_pps_session_factory
     deadline = _Deadline(deadline_seconds(), monotonic)
 
     want_late = late_enabled() if include_late is None else bool(include_late)
     want_fallback = (
         fallback_enabled() if include_fallback is None else bool(include_fallback)
     )
+    want_pps = pps_enabled() if include_pps is None else bool(include_pps)
 
     attempts = []
-    record = _attempt_imerg_runs(
-        state_name,
-        resolved,
-        fetched_at,
-        fetcher,
-        make_session,
-        deadline,
-        attempts,
-        want_late,
-    )
+    record = None
+    if want_pps:
+        record = _attempt_pps_runs(
+            state_name,
+            resolved,
+            fetched_at,
+            pps_fetcher,
+            pps_listing,
+            make_pps_session,
+            deadline,
+            attempts,
+            want_late,
+            monotonic,
+        )
+    if record is None:
+        record = _attempt_imerg_runs(
+            state_name,
+            resolved,
+            fetched_at,
+            fetcher,
+            make_session,
+            deadline,
+            attempts,
+            want_late,
+        )
     if record is None and want_fallback:
         record = _attempt_fallback(
             state_name, resolved, fetched_at, fall_back, attempts, monotonic
