@@ -41,6 +41,7 @@ import { BrandLockup } from '../components/brand/BrandMark';
 import { Eyebrow, StatusPill, ProvenanceTag, cn } from '../components/common/ui';
 import { DataStateBanner } from '../components/common/DataStateBanner';
 import { RainfallProvenanceBanner } from '../components/common/RainfallProvenanceBanner';
+import { LiveRainfallPanel } from '../components/common/LiveRainfallPanel';
 import { MeghalayaMap } from '../components/meghalaya/MeghalayaMap';
 import { toPilotMapCells } from '../components/pilot/pilotMapCells';
 import { apiService } from '../services/api';
@@ -674,6 +675,12 @@ export function MeghalayaDashboard({ onBack }: MeghalayaDashboardProps) {
                 </div>
               )
             )}
+
+            {/* LIVE rainfall monitor — a separate AOI-level read
+                (/api/v1/rainfall/latest), NOT the antecedent model rainfall
+                below and NOT derived from the map/grid payload. One request per
+                refresh, floored at the backend cache TTL. */}
+            <LiveRainfallPanel state="meghalaya" className="mt-4" />
 
             {/* Predicted risk zones — the persisted Meghalaya model over the AOI grid,
                 drawn from the compact /predict/meghalaya/map projection. Rainfall wording

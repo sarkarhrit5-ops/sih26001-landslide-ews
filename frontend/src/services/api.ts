@@ -13,6 +13,7 @@
 // (pilotMapCells imports only `import type` from here), so there is no runtime
 // import cycle.
 import { pilotGridEndpoint, pilotMapEndpoint } from '../components/pilot/pilotMapCells';
+import { liveRainfallEndpoint } from '../components/pilot/liveRainfallView';
 
 export type WarningLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
 export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH';
@@ -540,6 +541,104 @@ export interface PilotMapResponse {
   features: PilotMapFeature[];
 }
 
+/* ---------------------------------------------------------------------------
+ * LIVE rainfall monitoring read — GET /api/v1/rainfall/latest?state=<state>
+ *
+ * This is a DIFFERENT backend service from the antecedent model rainfall above
+ * (app/services/live_rainfall.py vs app/services/rainfall_service.py). It never
+ * feeds derive_rainfall_features(), has its own cache and its own
+ * SIH_LIVE_RAINFALL_* environment surface, and changes no prediction output.
+ *
+ * The types below are therefore DELIBERATELY separate from RainfallSourceKind /
+ * RainfallFreshness: those describe the model path, whose vocabulary differs
+ * (the model service has no IMERG_HHR_EARLY / IMERG_HHR_LATE, and the live
+ * service has no ttl_seconds / observation_lag_days / probe_* fields). Widening
+ * either set to cover both would let a live half-hourly observation be presented
+ * as an antecedent model input, or vice versa.
+ *
+ * An UNAVAILABLE record arrives with HTTP 200 and every numeric field null —
+ * that is the honest answer, not an error — so callers must render the reason
+ * and never substitute zero.
+ * ------------------------------------------------------------------------- */
+
+/** live_rainfall source_kind vocabulary, reported verbatim. */
+export type LiveRainfallSourceKind =
+  | 'IMERG_HHR_EARLY'
+  | 'IMERG_HHR_LATE'
+  | 'OPEN_METEO_FALLBACK';
+
+/** live_rainfall data_quality_status vocabulary, reported verbatim. */
+export type LiveRainfallQualityStatus = 'REAL' | 'FALLBACK' | 'UNAVAILABLE';
+
+/** live_rainfall freshness_label vocabulary, reported verbatim. */
+export type LiveRainfallFreshnessLabel = 'NEAR_REAL_TIME' | 'RECENT' | 'STALE';
+
+/**
+ * live_rainfall._freshness_block. Every record carries this block, whatever the
+ * source, so a FALLBACK observation is exactly as auditable as an IMERG one.
+ * The age-derived fields are null when there is no observation to age.
+ */
+export interface LiveRainfallFreshness {
+  observed_at_utc: string | null;
+  fetched_at_utc: string | null;
+  age_seconds: number | null;
+  age_minutes: number | null;
+  freshness_label: LiveRainfallFreshnessLabel | string | null;
+  is_stale: boolean | null;
+  staleness_threshold_minutes: number | null;
+  near_real_time_threshold_minutes: number | null;
+  measured_from: string | null;
+  /** false on a fresh acquisition, true when the record was replayed from cache. */
+  cache_hit: boolean | null;
+}
+
+/** One line of live_rainfall's provenance trail: what was tried, what came back. */
+export interface LiveRainfallAttempt {
+  source_kind: LiveRainfallSourceKind | string;
+  outcome: string;
+  detail?: string;
+}
+
+/** GET /api/v1/rainfall/latest?state=<state> */
+export interface LiveRainfallResponse {
+  state: string;
+  aoi_bounds: AoiBounds;
+  /**
+   * Named "latest available", never "current": IMERG Early publishes with hours
+   * of latency, so the newest observation is never now. null on UNAVAILABLE.
+   */
+  latest_available_rainfall_mm: number | null;
+  interval_minutes: number | null;
+  units: string;
+  observed_at_utc: string | null;
+  fetched_at_utc: string | null;
+  age_seconds: number | null;
+  age_minutes: number | null;
+  latency_minutes: number | null;
+  freshness_label: LiveRainfallFreshnessLabel | string | null;
+  freshness: LiveRainfallFreshness;
+  is_stale: boolean | null;
+  staleness_threshold_minutes: number | null;
+  expected_product_latency_minutes: number | null;
+  /** Long product label, e.g. "NASA GPM IMERG Early half-hourly (...)". */
+  source: string | null;
+  source_kind: LiveRainfallSourceKind | string | null;
+  data_quality_status: LiveRainfallQualityStatus | string;
+  granules_used: number;
+  attempts: LiveRainfallAttempt[];
+  value_semantics: string;
+  /** Present only on an UNAVAILABLE record; names what actually failed. */
+  unavailable_reason?: string | null;
+  /** null WITH a reason when the window was incomplete — never a partial sum. */
+  accum_3h_mm: number | null;
+  accum_3h_unavailable_reason: string | null;
+  accum_6h_mm: number | null;
+  accum_6h_unavailable_reason: string | null;
+  /** Stamped by get_latest_rainfall on every delivery. */
+  cache_hit?: boolean | null;
+  served_from_cache?: boolean | null;
+}
+
 class ApiService {
   private async fetchJson<T>(endpoint: string): Promise<T> {
     try {
@@ -786,6 +885,22 @@ class ApiService {
     step?: number,
   ): Promise<SikkimPredictionResponse> {
     return this.fetchJson<SikkimPredictionResponse>(pilotGridEndpoint(state, { date, step }));
+  }
+
+  /**
+   * LATEST AVAILABLE rainfall observation for a pilot AOI (monitoring read).
+   *
+   * ONE request per refresh for the whole panel — this is an AOI-level read, not
+   * a per-cell one, and it never touches /predict/<state>/map or /grid. The
+   * `?state=` value is the backend AOI label taken from the pilot registry, so
+   * an unknown key throws locally instead of reaching the API.
+   *
+   * Does NOT throw on missing data: the backend answers HTTP 200 with
+   * data_quality_status=UNAVAILABLE, unavailable_reason set and every numeric
+   * field null. Only an unknown state (400) or transport failure throws.
+   */
+  async getLatestRainfall(state: PilotStateKey): Promise<LiveRainfallResponse> {
+    return this.fetchJson<LiveRainfallResponse>(liveRainfallEndpoint(state));
   }
 }
 

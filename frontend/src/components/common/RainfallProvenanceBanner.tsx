@@ -14,6 +14,11 @@
  *
  * There is no code path here that prints a REAL/IMERG claim from missing data,
  * and no value is defaulted: an unreported field renders as "not reported".
+ *
+ * SCOPE: this banner describes the ANTECEDENT / MODEL rainfall (the T-1…T-14
+ * window the prediction consumes), and says so on its first line. The separate
+ * live monitoring read is rendered by LiveRainfallPanel; the two must never be
+ * conflated, since a live half-hourly observation is not a model input.
  */
 import { AlertTriangle, CloudOff, CloudRain, HelpCircle } from 'lucide-react';
 import type { PilotMapRainfallView, RainfallProvenanceBlock } from '../../services/api';
@@ -92,6 +97,9 @@ export function RainfallProvenanceBanner({
     >
       <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${style.icon}`} />
       <div className="min-w-0 space-y-1.5">
+        <div className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+          Antecedent / model rainfall · T-1…T-14 window
+        </div>
         <div>
           <span className={`font-mono font-semibold uppercase tracking-wide ${style.title}`}>
             {view.label}

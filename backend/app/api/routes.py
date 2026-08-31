@@ -28,6 +28,7 @@ from app.models.ml_pipeline import dynamic_risk_module, explain_risk
 from app.services import (
     arunachal_prediction,
     assam_prediction,
+    live_rainfall,
     meghalaya_prediction,
     pilot_events,
     pilot_map_view,
@@ -1242,3 +1243,38 @@ def predict_meghalaya_map(date: Optional[str] = None,
         meghalaya_prediction, meghalaya_prediction.predict_meghalaya_grid,
         date, step, run_type,
     )
+
+
+@router.get("/rainfall/latest")
+def rainfall_latest(state: str):
+    """
+    Latest AVAILABLE rainfall observation for a pilot AOI (monitoring read).
+
+    This is deliberately NOT called "current rainfall": the returned record
+    exposes `observed_at_utc`, `fetched_at_utc`, `age_minutes`,
+    `freshness_label` and `is_stale` so a stale observation cannot be mistaken
+    for a now-value.
+
+    Source preference is IMERG Early HHR, then IMERG Late HHR, then a clearly
+    labelled Open-Meteo FALLBACK; if all fail the record's
+    `data_quality_status` is UNAVAILABLE with every numeric field null.
+
+    This endpoint is entirely separate from the antecedent model rainfall
+    features (T-1..T-14). It never feeds derive_rainfall_features(), it uses
+    its own cache and its own SIH_LIVE_RAINFALL_* environment surface, and it
+    does not change any prediction output.
+
+    Because this is a monitoring read rather than a data dependency, an
+    UNAVAILABLE record is returned with HTTP 200 (the honest answer is the
+    payload, not an error). Only an unknown state is a 400.
+    """
+    try:
+        return live_rainfall.get_latest_rainfall(state)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unknown pilot state: %r. Supported: %s"
+                % (state, ", ".join(live_rainfall.supported_states()))
+            ),
+        )

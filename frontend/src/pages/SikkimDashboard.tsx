@@ -34,6 +34,7 @@ import { BrandLockup } from '../components/brand/BrandMark';
 import { Eyebrow, StatusPill, ProvenanceTag, cn } from '../components/common/ui';
 import { DataStateBanner } from '../components/common/DataStateBanner';
 import { RainfallProvenanceBanner } from '../components/common/RainfallProvenanceBanner';
+import { LiveRainfallPanel } from '../components/common/LiveRainfallPanel';
 import { SikkimMap } from '../components/sikkim/SikkimMap';
 import { toPilotMapCells } from '../components/pilot/pilotMapCells';
 import { apiService } from '../services/api';
@@ -665,6 +666,12 @@ export function SikkimDashboard({ onBack }: SikkimDashboardProps) {
                 </div>
               )
             )}
+
+            {/* LIVE rainfall monitor — a separate AOI-level read
+                (/api/v1/rainfall/latest), NOT the antecedent model rainfall
+                below and NOT derived from the map/grid payload. One request per
+                refresh, floored at the backend cache TTL. */}
+            <LiveRainfallPanel state="sikkim" className="mt-4" />
 
             {/* Predicted risk zones — the persisted model over the AOI grid, drawn
                 from the compact /predict/sikkim/map projection. Rainfall wording is
