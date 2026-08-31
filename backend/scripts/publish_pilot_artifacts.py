@@ -6,10 +6,17 @@ artifacts on a fresh deployment; this script prepares what it downloads from the
 that already exist on a machine that has run the prepare_* drivers.
 
 Covers all FOUR states -- Assam, Arunachal Pradesh, Meghalaya and Sikkim -- i.e. the 20
-terrain rasters, PLUS ONE non-raster object: Meghalaya's real OSM exposure GeoJSON
-(data/raw/meghalaya_osm.geojson). The other three states' OSM files are committed and
-present everywhere; Meghalaya's is not, which is why state_validation reports its
-exposure as missing on every instance. So the full publish set is 21 objects.
+terrain rasters, PLUS the three real ESA WorldCover land-cover rasters of the WorldCover
+pilots (data/raw/assam_pilot_landcover.tif, data/raw/arunachal_pilot_landcover.tif,
+data/raw/meghalaya_pilot_landcover.tif), PLUS ONE non-raster object: Meghalaya's real OSM
+exposure GeoJSON (data/raw/meghalaya_osm.geojson). The other three states' OSM files are
+committed and present everywhere; Meghalaya's is not, which is why state_validation
+reports its exposure as missing on every instance. So the full publish set is 24 objects.
+
+Sikkim contributes NO land-cover object: its land_cover_class is derived from elevation
+inside its own prediction path, it opens no land-cover raster, and its model was trained
+without one. LANDCOVER_ARTIFACT_STATES therefore names exactly the three WorldCover
+pilots, and the publish set follows it.
 
 That GeoJSON is produced by state_validation.acquire_state_osm() (real Overpass query
 via exposure.get_osm_assets; NEVER mock_get_osm_assets). Until it exists locally this
@@ -85,10 +92,11 @@ UPLOADERS = {
 def collect(states, data_dir=None):
     """[(state, feature, path)] for every artifact of each state, in a stable order.
 
-    That is the five rasters per state, plus the OSM exposure GeoJSON for any state the
-    store wires one for (Meghalaya). The list comes from artifact_wiring()["paths"], i.e.
-    the SAME resolver the runtime downloads into, so this script cannot publish under a
-    name the runtime does not ask for.
+    That is the five rasters per state, plus the WorldCover land-cover raster for each
+    state the store wires one for (Assam, Arunachal Pradesh, Meghalaya), plus the OSM
+    exposure GeoJSON for any state the store wires one for (Meghalaya). The list comes
+    from artifact_wiring()["paths"], i.e. the SAME resolver the runtime downloads into,
+    so this script cannot publish under a name the runtime does not ask for.
 
     Sikkim contributes its PUBLISHED (sweep-family) names only -- sikkim_dem.tif and
     sikkim_<name>.tif. Its serving twins (east_sikkim_dem.tif, real_<name>.tif) are
@@ -127,7 +135,8 @@ def min_bytes_for(feature):
     """
     The smallest size that counts as present for this artifact, mirroring whichever
     reader gates on it: > 100 bytes for an OSM exposure GeoJSON
-    (state_validation.evaluate_exposure_data), > 0 for a raster.
+    (state_validation.evaluate_exposure_data), > 0 for a raster -- terrain and land cover
+    alike, both of which their readers gate on getsize > 0.
 
     Publishing a 40-byte GeoJSON would put an entry in the manifest for a file the
     dashboard still calls Missing, so the two gates have to agree.

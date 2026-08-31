@@ -8,6 +8,10 @@
       "bytes": 193136550,
       "sha256": "4e1d006b83bbaf0b49c933fdda12ca7e3f2a3c1146bae205b907e2303fa7e8fd"
     },
+    "arunachal_pilot_landcover.tif": {
+      "bytes": 536507658,
+      "sha256": "997ddaa2cf2d61d96e6602306c3858bb8ead920c97b13a2766bed3240afc657e"
+    },
     "arunachal_pilot_roughness.tif": {
       "bytes": 193136568,
       "sha256": "2b152d6ef2c2a93d59ba8d6332c128ac715e7fe0d64ac13c43e15904d1564305"
@@ -27,6 +31,10 @@
     "assam_pilot_dem.tif": {
       "bytes": 124437966,
       "sha256": "94d343600d7ac572f9d5f9ed2d56c3cfce26dbf0eefadf09583bf611b15991a8"
+    },
+    "assam_pilot_landcover.tif": {
+      "bytes": 345672378,
+      "sha256": "2a7e88cf42146de0e0bbf64a8dc676781c14a6bf840a232561ae90502d2ae7e8"
     },
     "assam_pilot_roughness.tif": {
       "bytes": 124437984,
@@ -51,6 +59,10 @@
     "meghalaya_pilot_dem.tif": {
       "bytes": 92400630,
       "sha256": "7981e3b639225d21adb3896fb7eb3755299634dac4ea793184b254aa3bccb302"
+    },
+    "meghalaya_pilot_landcover.tif": {
+      "bytes": 256679658,
+      "sha256": "5e176222c7d4922b376a9465db9e2d2ae89ff73194a60b69cc159d512151f910"
     },
     "meghalaya_pilot_roughness.tif": {
       "bytes": 92400648,

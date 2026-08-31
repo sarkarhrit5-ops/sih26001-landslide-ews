@@ -479,6 +479,36 @@ def _rainfall_note(rainfall):
     return note
 
 
+def rainfall_source_label(rainfall):
+    """
+    A SHORT clause naming the rainfall series that was actually used, for the
+    top-level `generated_from` metadata.
+
+    The previous literal said "real IMERG antecedent rainfall" unconditionally,
+    which mislabels an Open-Meteo ERA5 fallback as an official IMERG observation
+    -- the single most misleading string a response could carry. Shared by all
+    four pilot services so they cannot drift apart.
+    """
+    if not isinstance(rainfall, dict):
+        return "antecedent rainfall of UNREPORTED provenance"
+    if rainfall.get("is_fallback"):
+        source = rainfall.get("source") or "Open-Meteo ERA5 archive"
+        return (
+            "FALLBACK antecedent rainfall from %s (data_quality_status=%s; NOT an "
+            "official live IMERG observation)"
+            % (source, rainfall.get("data_quality_status") or "FALLBACK")
+        )
+    source_kind = rainfall.get("source_kind")
+    if source_kind == "IMERG" or (source_kind is None and rainfall.get("source")):
+        return "real %s antecedent rainfall" % (rainfall.get("source") or "IMERG")
+    if source_kind:
+        return "antecedent rainfall from %s (data_quality_status=%s)" % (
+            rainfall.get("source") or source_kind,
+            rainfall.get("data_quality_status") or "UNKNOWN",
+        )
+    return "antecedent rainfall of UNREPORTED provenance"
+
+
 def _rainfall_report(rainfall):
     report = {
         "source": rainfall.get("source"),
@@ -626,8 +656,8 @@ def predict_sikkim_grid(target_date, step_deg=DEFAULT_STEP_DEG, run_type="Early"
         "state": state_name,
         "pilot_area": "East Sikkim",
         "generated_from": (
-            "persisted LightGBM (static_plus_rainfall, 11 features) + real IMERG "
-            "antecedent rainfall"
+            "persisted LightGBM (static_plus_rainfall, 11 features) + %s"
+            % rainfall_source_label(rainfall)
         ),
         "target_date": target_date.strftime("%Y-%m-%d"),
         "aoi": bounds,

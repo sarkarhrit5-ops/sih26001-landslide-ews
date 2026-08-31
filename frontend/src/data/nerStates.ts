@@ -181,3 +181,96 @@ export function getStateMeta(stateId: string | undefined): NerStateMeta | undefi
 export function validationTone(overallStatus: string | undefined): StateValidationTone {
   return (overallStatus || '').toUpperCase().includes('VALIDATED_PILOT') ? 'pilot' : 'pending';
 }
+
+/**
+ * The four pilot consoles, keyed by the SAME token the backend uses in its route
+ * paths (/api/v1/predict/<key>/map, /api/v1/validation/<key>/evidence). Note the
+ * key is the route token, which for Arunachal is "arunachal" — deliberately not
+ * the backend state_id "arunachal_pradesh" (that is carried separately as
+ * `stateId`, and the two must not be conflated).
+ */
+export type PilotStateKey = 'sikkim' | 'assam' | 'arunachal' | 'meghalaya';
+
+export interface PilotConsoleConfig {
+  /** Route token used to build the backend endpoint paths. */
+  key: PilotStateKey;
+  /** Backend state_id (config_states) — NOT always equal to `key`. */
+  stateId: string;
+  name: string;
+  /**
+   * Canonical pilot AOI, mirroring the corresponding config_states constant.
+   * This is the modelled extent and is deliberately NOT the full state.
+   */
+  aoi: AdminBounds;
+  /** Initial Leaflet zoom for this console — preserves each map's current framing. */
+  zoom: number;
+  /** Tooltip on the AOI rectangle — preserves each map's current wording. */
+  aoiTooltip: string;
+  /**
+   * Tooltip on a cell the backend returned as UNAVAILABLE. Sikkim needs only
+   * terrain; the three WorldCover pilots additionally need land cover, so their
+   * wording names both inputs. Neither version claims a risk value.
+   */
+  unavailableCellTooltip: string;
+}
+
+/**
+ * Single source of truth for pilot endpoint + AOI selection. Every console reads
+ * its AOI, framing and endpoint token from here rather than hard-coding them, so
+ * a new pilot is one entry and no per-state branch. Contains no risk, rainfall or
+ * model numbers.
+ */
+export const PILOT_REGISTRY: Record<PilotStateKey, PilotConsoleConfig> = {
+  sikkim: {
+    key: 'sikkim',
+    stateId: 'sikkim',
+    name: 'Sikkim',
+    aoi: EAST_SIKKIM_PILOT_AOI,
+    zoom: 9,
+    aoiTooltip: 'East Sikkim pilot AOI — modelled extent',
+    unavailableCellTooltip: 'No prediction (terrain unavailable at this cell)',
+  },
+  assam: {
+    key: 'assam',
+    stateId: 'assam',
+    name: 'Assam',
+    aoi: ASSAM_PILOT_AOI,
+    zoom: 8,
+    aoiTooltip: 'Assam pilot AOI — modelled extent',
+    unavailableCellTooltip:
+      'No prediction (terrain or land cover unavailable at this cell)',
+  },
+  arunachal: {
+    key: 'arunachal',
+    stateId: 'arunachal_pradesh',
+    name: 'Arunachal Pradesh',
+    aoi: ARUNACHAL_PILOT_AOI,
+    zoom: 8,
+    aoiTooltip: 'Arunachal Pradesh pilot AOI — modelled extent',
+    unavailableCellTooltip:
+      'No prediction (terrain or land cover unavailable at this cell)',
+  },
+  meghalaya: {
+    key: 'meghalaya',
+    stateId: 'meghalaya',
+    name: 'Meghalaya',
+    aoi: MEGHALAYA_PILOT_AOI,
+    zoom: 8,
+    aoiTooltip: 'Meghalaya pilot AOI — modelled extent',
+    unavailableCellTooltip:
+      'No prediction (terrain or land cover unavailable at this cell)',
+  },
+};
+
+export const PILOT_STATE_KEYS: PilotStateKey[] = ['sikkim', 'assam', 'arunachal', 'meghalaya'];
+
+/** Throws on an unknown key rather than silently falling back to another state's AOI. */
+export function getPilotConfig(key: string): PilotConsoleConfig {
+  const config = (PILOT_REGISTRY as Record<string, PilotConsoleConfig | undefined>)[key];
+  if (!config) {
+    throw new Error(
+      `Unknown pilot state key "${key}" — expected one of ${PILOT_STATE_KEYS.join(', ')}`,
+    );
+  }
+  return config;
+}

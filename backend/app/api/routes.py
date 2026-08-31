@@ -30,6 +30,7 @@ from app.services import (
     assam_prediction,
     meghalaya_prediction,
     pilot_events,
+    pilot_map_view,
     pilot_point_prediction,
     risk_inputs,
     sikkim_prediction,
@@ -1089,3 +1090,155 @@ def predict_meghalaya_grid(date: Optional[str] = None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Lightweight map views of the four pilot grid predictions.
+#
+# WHY THESE EXIST
+#     /predict/<state>/grid returns, per cell, the full 11-value feature vector,
+#     the cell bbox and the per-cell reasons. That payload is the right one for
+#     auditing a prediction and its contract is FROZEN -- nothing below changes
+#     it. It is the wrong payload for drawing a map, where only a coordinate, a
+#     probability and a class are needed.
+#
+# WHAT THEY COST
+#     Exactly what the matching /grid endpoint costs. Each handler runs its
+#     prediction service ONCE and hands that one result to
+#     pilot_map_view.to_map_geojson, which is a pure transform: it runs no model,
+#     fetches no rainfall and opens no raster, so it cannot change a probability
+#     because it only ever copies one.
+#
+# HONESTY
+#     Cells are copied, never filtered: a cell the backend could not score stays
+#     in the FeatureCollection with probability=None and status="UNAVAILABLE",
+#     because a dropped cell would read as "safe". The rainfall provenance block
+#     is copied verbatim, so a FALLBACK series can never be presented here as a
+#     live IMERG observation.
+# ---------------------------------------------------------------------------
+
+def _parse_map_target_date(date):
+    """The same 'YYYY-MM-DD' contract (and the same HTTP 400) as /grid."""
+    if date is None:
+        return datetime.utcnow()
+    try:
+        return datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid 'date' %r; expected format YYYY-MM-DD." % date,
+        )
+
+
+def _pilot_map_response(service, predict, date, step, run_type):
+    """
+    Run one pilot grid prediction ONCE and project it into the map view.
+
+    `predict` is the service's own predict_<state>_grid callable; the error
+    mapping is identical to the /grid handlers (503 DATA_UNAVAILABLE for a
+    missing real input, 400 for a bad `date` or `step`).
+    """
+    target_date = _parse_map_target_date(date)
+    try:
+        prediction = predict(target_date, step_deg=step, run_type=run_type)
+    except service.PredictionUnavailable as exc:
+        raise HTTPException(
+            status_code=DATA_UNAVAILABLE_STATUS_CODE,
+            detail={
+                "status": "DATA_UNAVAILABLE",
+                "reason": exc.reason,
+                "details": exc.details,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return pilot_map_view.to_map_geojson(_with_rainfall_provenance(prediction))
+
+
+@router.get("/predict/sikkim/map")
+def predict_sikkim_map(date: Optional[str] = None,
+                       step: float = sikkim_prediction.DEFAULT_STEP_DEG,
+                       run_type: str = "Early"):
+    """
+    Map-sized projection of /predict/sikkim/grid for the SAME request.
+
+    A GeoJSON FeatureCollection with one Point feature per grid cell at the cell
+    CENTER -- the point the model was actually sampled at -- carrying only
+    `cell_id`, `status`, `probability`, `risk_class` and
+    `exceeds_decision_threshold`. Per-cell feature vectors, cell bboxes and
+    per-cell reasons are omitted here and remain unchanged on
+    /predict/sikkim/grid.
+
+    Top level also carries `state`, `pilot_area`, `target_date`,
+    `generated_from`, `decision_threshold`, `aoi`, `grid`, the rainfall
+    provenance subset and `summary` -- all O(1) in the cell count. `aoi` and
+    `grid` are present because without per-cell bboxes a client still needs the
+    extent and the cell size to draw the cells.
+
+    Query params and error behaviour are identical to /predict/sikkim/grid; the
+    prediction runs exactly once.
+    """
+    return _pilot_map_response(
+        sikkim_prediction, sikkim_prediction.predict_sikkim_grid,
+        date, step, run_type,
+    )
+
+
+@router.get("/predict/assam/map")
+def predict_assam_map(date: Optional[str] = None,
+                      step: float = assam_prediction.DEFAULT_STEP_DEG,
+                      run_type: str = "Early"):
+    """
+    Map-sized projection of /predict/assam/grid for the SAME request.
+
+    Identical contract to /predict/sikkim/map: a GeoJSON FeatureCollection of
+    cell-center Points whose properties are limited to `cell_id`, `status`,
+    `probability`, `risk_class` and `exceeds_decision_threshold`. The full
+    per-cell feature vectors (including the REAL categorical WorldCover land
+    cover), bboxes and reasons stay on /predict/assam/grid.
+
+    Query params and error behaviour are identical to /predict/assam/grid; the
+    prediction runs exactly once.
+    """
+    return _pilot_map_response(
+        assam_prediction, assam_prediction.predict_assam_grid,
+        date, step, run_type,
+    )
+
+
+@router.get("/predict/arunachal/map")
+def predict_arunachal_map(date: Optional[str] = None,
+                          step: float = arunachal_prediction.DEFAULT_STEP_DEG,
+                          run_type: str = "Early"):
+    """
+    Map-sized projection of /predict/arunachal/grid for the SAME request.
+
+    Identical contract to /predict/sikkim/map; the full per-cell feature vectors,
+    bboxes and reasons stay on /predict/arunachal/grid.
+
+    Query params and error behaviour are identical to /predict/arunachal/grid;
+    the prediction runs exactly once.
+    """
+    return _pilot_map_response(
+        arunachal_prediction, arunachal_prediction.predict_arunachal_grid,
+        date, step, run_type,
+    )
+
+
+@router.get("/predict/meghalaya/map")
+def predict_meghalaya_map(date: Optional[str] = None,
+                          step: float = meghalaya_prediction.DEFAULT_STEP_DEG,
+                          run_type: str = "Early"):
+    """
+    Map-sized projection of /predict/meghalaya/grid for the SAME request.
+
+    Identical contract to /predict/sikkim/map; the full per-cell feature vectors,
+    bboxes and reasons stay on /predict/meghalaya/grid.
+
+    Query params and error behaviour are identical to /predict/meghalaya/grid;
+    the prediction runs exactly once.
+    """
+    return _pilot_map_response(
+        meghalaya_prediction, meghalaya_prediction.predict_meghalaya_grid,
+        date, step, run_type,
+    )

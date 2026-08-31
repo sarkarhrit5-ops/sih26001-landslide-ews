@@ -268,10 +268,11 @@ def test_a_run_requests_the_default_manifest_name(monkeypatch, tmp_path):
     root, _pilots, store = _wire(monkeypatch, tmp_path, ["Assam"])
     report = _run(root, ["Assam"], store)
     assert store.manifest_loads == ["https://cdn.example/pilots/pilot_manifest.json"]
-    # Behaviour unchanged: the objects themselves are still fetched by raster basename.
-    assert sorted(url.rsplit("/", 1)[-1] for url in store.gets) == [
+    # Behaviour unchanged: the objects themselves are still fetched by basename -- the
+    # five terrain rasters plus Assam's WorldCover land cover.
+    assert sorted(url.rsplit("/", 1)[-1] for url in store.gets) == sorted([
         "assam_pilot_aspect.tif", "assam_pilot_dem.tif", "assam_pilot_roughness.tif",
-        "assam_pilot_slope.tif", "assam_pilot_tpi.tif"]
+        "assam_pilot_slope.tif", "assam_pilot_tpi.tif", _landcover_filename("Assam")])
     assert report["failed"] == 0
 
 
@@ -403,12 +404,35 @@ def _osm_payload(state_name, repeat=4):
     return ('{"type":"FeatureCollection","features":[%s]}' % features).encode("utf-8")
 
 
+def _landcover_filename(state_name):
+    """The published basename, taken from the store's own resolver.
+
+    Deliberately not a literal: the resolver reads the state's prediction module's OWN
+    <state>_landcover_raster_path, so a test that hard-coded the name could keep passing
+    after the predictor's filename changed.
+    """
+    return os.path.basename(
+        pas.landcover_artifact_paths(state_name)[pas.LANDCOVER_FEATURE])
+
+
+def _landcover_path(state_name, root):
+    """Where that raster has to land under a given data root."""
+    return pas.landcover_artifact_paths(state_name, root)[pas.LANDCOVER_FEATURE]
+
+
+def _landcover_payload(state_name, size=48):
+    """A distinct body per state, so a mixed-up raster cannot pass verification."""
+    return (("%s:land_cover:" % state_name).encode("utf-8") * size)
+
+
 def _wire(monkeypatch, tmp_path, states):
     """Filesystem-backed pilots plus a store that holds exactly their artifacts.
 
-    A state the store wires an exposure GeoJSON for (Meghalaya) carries that object too:
-    it is part of that state's `missing` set, so a store without it would report
-    "incomplete" for a reason unrelated to whatever the test is actually about.
+    A state the store wires an exposure GeoJSON for (Meghalaya) carries that object too,
+    and so does a state it wires a WorldCover land-cover raster for (Assam, Arunachal
+    Pradesh, Meghalaya): both are part of that state's `missing` set, so a store without
+    them would report "incomplete" for a reason unrelated to whatever the test is
+    actually about. Sikkim is in NEITHER group -- see _run_sikkim.
     """
     root = _fake_root(tmp_path)
     pilots = {state: _FsPilot(PREFIXES[state], root) for state in states}
@@ -418,6 +442,8 @@ def _wire(monkeypatch, tmp_path, states):
         payloads.update(_payloads_for(PREFIXES[state]))
         if state in pas.OSM_ARTIFACT_STATES:
             payloads[pas.osm_artifact_filename(state)] = _osm_payload(state)
+        if state in pas.LANDCOVER_ARTIFACT_STATES:
+            payloads[_landcover_filename(state)] = _landcover_payload(state)
     return root, pilots, _Store(payloads)
 
 
@@ -441,6 +467,9 @@ def test_nothing_missing_means_zero_network_io(monkeypatch, tmp_path):
     root, pilots, store = _wire(monkeypatch, tmp_path, ["Assam"])
     for _feature, path in _paths_for("assam_pilot", root).items():
         _write(path)
+    # Assam's land cover counts towards "nothing missing" now, so it has to be present
+    # too -- otherwise the store would (correctly) go and fetch the manifest for it.
+    _write(_landcover_path("Assam", root))
     report = _run(root, ["Assam"], store)
     assert store.manifest_loads == [] and store.gets == []
     assert [r["status"] for r in report["results"]] == ["already_present"]
@@ -452,12 +481,28 @@ def test_only_the_missing_rasters_are_downloaded(monkeypatch, tmp_path):
     paths = _paths_for("assam_pilot", root)
     _write(paths["elevation"])
     _write(paths["slope"])
+    _write(_landcover_path("Assam", root))
     report = _run(root, ["Assam"], store)
     fetched = sorted(url.rsplit("/", 1)[-1] for url in store.gets)
     assert fetched == ["assam_pilot_aspect.tif", "assam_pilot_roughness.tif",
                        "assam_pilot_tpi.tif"]
     assert report["results"][0]["status"] == "prepared"
     assert sorted(report["results"][0]["downloaded"]) == ["aspect", "roughness", "tpi"]
+
+
+def test_only_the_missing_land_cover_raster_is_downloaded(monkeypatch, tmp_path):
+    """The same "only what is missing" rule, exercised from the land-cover side."""
+    root, pilots, store = _wire(monkeypatch, tmp_path, ["Assam"])
+    for _feature, path in _paths_for("assam_pilot", root).items():
+        _write(path)
+    report = _run(root, ["Assam"], store)
+    assert sorted(url.rsplit("/", 1)[-1] for url in store.gets) == \
+        [_landcover_filename("Assam")]
+    assert report["results"][0]["status"] == "prepared"
+    assert report["results"][0]["downloaded"] == [pas.LANDCOVER_FEATURE]
+    landcover = _landcover_path("Assam", root)
+    with open(landcover, "rb") as handle:
+        assert handle.read() == store.payloads[os.path.basename(landcover)]
 
 
 def test_full_fetch_writes_verified_bytes_to_the_canonical_paths(monkeypatch, tmp_path):
@@ -524,9 +569,9 @@ def test_a_404_leaves_that_raster_missing(monkeypatch, tmp_path):
     assert "no verifiable manifest entry" in report["results"][0]["error"]
     # Not in the manifest means not even attempted.
     assert not any(url.endswith("assam_pilot_tpi.tif") for url in store.gets)
-    # The other four still landed -- a partial failure is not an excuse to do nothing.
-    assert sorted(report["results"][0]["downloaded"]) == ["aspect", "elevation",
-                                                          "roughness", "slope"]
+    # The other five still landed -- a partial failure is not an excuse to do nothing.
+    assert sorted(report["results"][0]["downloaded"]) == sorted(
+        ["aspect", "elevation", "roughness", "slope", pas.LANDCOVER_FEATURE])
 
 
 def test_manifest_lists_it_but_storage_404s(monkeypatch, tmp_path):
@@ -634,18 +679,21 @@ def test_a_redeploy_relinks_the_cache_without_downloading_again(monkeypatch, tmp
     env = _env(SIH_PILOT_ARTIFACT_CACHE_DIR=cache)
     _run(root, ["Assam"], store, env=env)
     first = len(store.gets)
-    assert first == 5
+    assert first == 6  # five terrain rasters plus Assam's WorldCover land cover
 
     # Simulate the new container: canonical paths (symlinks) are gone, cache survives.
     for _feature, path in _paths_for("assam_pilot", root).items():
         os.remove(path)
+    os.remove(_landcover_path("Assam", root))
     assert pilots["Assam"].missing(root) != []
 
     report = _run(root, ["Assam"], store, env=env)
     assert len(store.gets) == first, "cached artifacts must not be re-downloaded"
     assert report["acted"] == 1
-    assert sorted(report["results"][0]["cached"]) == sorted(FEATURES)
+    assert sorted(report["results"][0]["cached"]) == \
+        sorted(FEATURES + (pas.LANDCOVER_FEATURE,))
     assert pilots["Assam"].missing(root) == []
+    assert os.path.islink(_landcover_path("Assam", root))
 
 
 def test_a_corrupt_cached_copy_is_replaced_not_trusted(monkeypatch, tmp_path):
@@ -1004,19 +1052,20 @@ def _publish_module():
     return module
 
 
-def test_publisher_collects_five_rasters_per_state_plus_one_geojson(monkeypatch,
-                                                                   tmp_path):
+def test_publisher_collects_the_full_publish_set(monkeypatch, tmp_path):
     """
-    21 objects, not 25 and not 26: listing east_sikkim_dem.tif / real_*.tif, or the
+    24 objects -- 20 terrain rasters, 3 WorldCover land-cover rasters, 1 exposure
+    GeoJSON -- not 28 and not 29: listing east_sikkim_dem.tif / real_*.tif, or the
     data/raw/osm/ twin, would claim objects exist in storage that were never uploaded.
+    Sikkim contributes no land cover, so exactly three states do.
     """
     publish = _publish_module()
     root, _pilots, _store = _wire(monkeypatch, tmp_path, list(PREFIXES))
     items = publish.collect(pas.PILOT_ARTIFACT_STATES, root)
-    assert len(items) == 21
+    assert len(items) == 24
     filenames = sorted(os.path.basename(path) for _s, _f, path in items)
-    assert len(set(filenames)) == 21
-    assert len([n for n in filenames if n.endswith(".tif")]) == 20
+    assert len(set(filenames)) == 24
+    assert len([n for n in filenames if n.endswith(".tif")]) == 23
     assert [n for n in filenames if n.endswith(".geojson")] == ["meghalaya_osm.geojson"]
     assert sorted(n for n in filenames if n.startswith("sikkim_")) == \
         sorted(SIKKIM_PAYLOADS)
@@ -1025,6 +1074,14 @@ def test_publisher_collects_five_rasters_per_state_plus_one_geojson(monkeypatch,
     # The one GeoJSON is Meghalaya's, and it sits directly under raw/ -- not raw/osm/.
     osm = [path for _s, feature, path in items if feature == pas.OSM_EXPOSURE_FEATURE]
     assert osm == [os.path.join(os.path.abspath(root), "raw", "meghalaya_osm.geojson")]
+    # The three land-cover objects are exactly LANDCOVER_ARTIFACT_STATES', at the paths
+    # their own predictors open, and Sikkim is not among them.
+    land = {state: path for state, feature, path in items
+            if feature == pas.LANDCOVER_FEATURE}
+    assert sorted(land) == sorted(pas.LANDCOVER_ARTIFACT_STATES)
+    assert SIKKIM not in land
+    for state, path in land.items():
+        assert path == _landcover_path(state, root)
 
 
 def test_publisher_reports_the_runtime_alias_links(monkeypatch, tmp_path):
@@ -1404,7 +1461,8 @@ def test_only_meghalaya_carries_an_osm_exposure_artifact(monkeypatch, tmp_path):
                        for _f, p in pas.artifact_wiring(state_name)["missing"](root))
     paths = pas.artifact_wiring(MEGHALAYA)["paths"](root)
     assert pas.OSM_EXPOSURE_FEATURE in paths
-    assert sorted(paths) == sorted(FEATURES + (pas.OSM_EXPOSURE_FEATURE,))
+    assert sorted(paths) == sorted(FEATURES + (pas.OSM_EXPOSURE_FEATURE,
+                                               pas.LANDCOVER_FEATURE))
     assert os.path.basename(paths[pas.OSM_EXPOSURE_FEATURE]) == OSM_FILENAME
 
 
@@ -1559,6 +1617,7 @@ def test_an_already_present_geojson_is_not_re_downloaded(monkeypatch, tmp_path):
         _write(path)
     _write(os.path.join(os.path.abspath(root), "raw", OSM_FILENAME),
            store.payloads[OSM_FILENAME])
+    _write(_landcover_path(MEGHALAYA, root))
     report = _run(root, [MEGHALAYA], store)
     assert store.manifest_loads == [] and store.gets == []
     assert [r["status"] for r in report["results"]] == ["already_present"]
@@ -1587,8 +1646,10 @@ def test_unverifiable_geojson_never_promoted(monkeypatch, tmp_path, mode, reason
     assert (pas.OSM_EXPOSURE_FEATURE, published) in \
         pas.artifact_wiring(MEGHALAYA)["missing"](root)
     assert [p for p in _all_files(root) if p.endswith(".part")] == []
-    # The five rasters are not held hostage by the exposure failure.
-    assert sorted(report["results"][0]["downloaded"]) == sorted(FEATURES)
+    # The rasters -- terrain and land cover -- are not held hostage by the exposure
+    # failure.
+    assert sorted(report["results"][0]["downloaded"]) == \
+        sorted(FEATURES + (pas.LANDCOVER_FEATURE,))
 
 
 def test_no_manifest_entry_for_the_geojson_reports_incomplete_honestly(monkeypatch,
@@ -1608,7 +1669,7 @@ def test_no_manifest_entry_for_the_geojson_reports_incomplete_honestly(monkeypat
     assert not os.path.exists(os.path.join(os.path.abspath(root), "raw", OSM_FILENAME))
     assert not os.path.exists(os.path.join(os.path.abspath(root), "raw", "osm",
                                            OSM_FILENAME))
-    assert sorted(result["downloaded"]) == sorted(FEATURES)
+    assert sorted(result["downloaded"]) == sorted(FEATURES + (pas.LANDCOVER_FEATURE,))
     assert pilots[MEGHALAYA].missing(root) == []
 
 
@@ -1650,6 +1711,8 @@ def test_publisher_gates_the_geojson_on_100_bytes_and_rasters_on_zero(tmp_path):
     assert publish.min_bytes_for(pas.OSM_EXPOSURE_FEATURE) == pas.OSM_MIN_BYTES == 100
     for feature in FEATURES:
         assert publish.min_bytes_for(feature) == 0
+    # Land cover is a raster: the same > 0 gate as terrain, NOT the GeoJSON's > 100.
+    assert publish.min_bytes_for(pas.LANDCOVER_FEATURE) == 0
 
     root = _fake_root(tmp_path)
     target = pas.osm_artifact_paths(MEGHALAYA, root)[pas.OSM_EXPOSURE_FEATURE]
@@ -1668,3 +1731,204 @@ def test_publisher_gates_the_geojson_on_100_bytes_and_rasters_on_zero(tmp_path):
                                       "sha256": hashlib.sha256(body).hexdigest()}}
     ok, rows = publish.verify_manifest(entries, items)
     assert ok is True and rows == [(OSM_FILENAME, None)]
+
+
+# --------------------------------------------------------------------------------
+# The three WorldCover land-cover rasters (Assam, Arunachal Pradesh, Meghalaya)
+#
+# These were the last deployment blocker: each of the three predictors opens
+# data/raw/<state>_pilot_landcover.tif and raises PredictionUnavailable without it, yet
+# the files carried no manifest entry, so a fresh instance could never obtain them.
+# What is pinned below is that they travel the SAME streamed, hash-verified, atomic path
+# as the terrain rasters, that they land exactly where the predictors read, and -- just
+# as importantly -- that SIKKIM ACQUIRES NO LAND-COVER DEPENDENCY.
+# --------------------------------------------------------------------------------
+
+def test_exactly_the_three_worldcover_pilots_carry_land_cover():
+    """
+    Sikkim derives land_cover_class from ELEVATION inside its own prediction path; it
+    opens no land-cover raster and its model was never trained with one. Adding it here
+    would invent a dependency and could flip its status to unavailable on every instance.
+    """
+    assert pas.LANDCOVER_ARTIFACT_STATES == ("Assam", "Arunachal Pradesh", "Meghalaya")
+    assert SIKKIM not in pas.LANDCOVER_ARTIFACT_STATES
+    assert set(pas.LANDCOVER_ARTIFACT_STATES) < set(pas.PILOT_ARTIFACT_STATES)
+    assert set(pas.LANDCOVER_ARTIFACT_STATES) == set(pas._LANDCOVER_PATH_FUNCTIONS)
+
+
+def test_sikkim_wiring_never_mentions_land_cover(tmp_path):
+    root = _fake_root(tmp_path)
+    wiring = pas.artifact_wiring(SIKKIM)
+    paths = wiring["paths"](root)
+    assert pas.LANDCOVER_FEATURE not in paths
+    assert not any("landcover" in path for path in paths.values())
+    assert not any(feature == pas.LANDCOVER_FEATURE
+                   for feature, _p in wiring["missing"](root))
+    assert not any("landcover" in path for _f, path in wiring["missing"](root))
+    with pytest.raises(KeyError):
+        pas.landcover_artifact_paths(SIKKIM, root)
+
+
+def test_the_land_cover_target_is_the_path_the_predictor_opens(tmp_path):
+    """
+    Requirement 8, enforced structurally rather than by assertion: the store resolves the
+    path through each prediction module's OWN <state>_landcover_raster_path, so the object
+    it downloads cannot drift from the file that module opens. Asserted here against those
+    same functions imported independently.
+    """
+    from app.services import arunachal_prediction, assam_prediction, meghalaya_prediction
+    readers = {"Assam": assam_prediction.assam_landcover_raster_path,
+               "Arunachal Pradesh": arunachal_prediction.arunachal_landcover_raster_path,
+               "Meghalaya": meghalaya_prediction.meghalaya_landcover_raster_path}
+    root = _fake_root(tmp_path)
+    for state_name, reader in readers.items():
+        resolved = pas.landcover_artifact_paths(state_name, root)
+        assert resolved == {pas.LANDCOVER_FEATURE: reader(root)}
+        assert pas.artifact_wiring(state_name)["paths"](root)[pas.LANDCOVER_FEATURE] == \
+            reader(root)
+        # data/raw/<state>_pilot_landcover.tif -- the collision-free pilot naming.
+        assert os.path.dirname(reader(root)) == os.path.join(root, "raw")
+        assert os.path.basename(reader(root)).endswith("_pilot_landcover.tif")
+    # No data_dir means the backend's own root, and the basenames stay distinct.
+    names = [_landcover_filename(state) for state in pas.LANDCOVER_ARTIFACT_STATES]
+    assert sorted(names) == ["arunachal_pilot_landcover.tif", "assam_pilot_landcover.tif",
+                             "meghalaya_pilot_landcover.tif"]
+    assert len(set(names)) == 3
+
+
+def test_the_full_publish_set_is_24_distinct_basenames(tmp_path):
+    """One object per name across all four states: nothing overwrites anything."""
+    root = _fake_root(tmp_path)
+    names = []
+    for state_name in pas.PILOT_ARTIFACT_STATES:
+        names.extend(os.path.basename(path) for path
+                     in pas.artifact_wiring(state_name)["paths"](root).values())
+    assert len(names) == 24
+    assert len(set(names)) == 24
+    assert len([n for n in names if n.endswith("_pilot_landcover.tif")]) == 3
+
+
+def test_a_zero_byte_land_cover_raster_counts_as_missing(tmp_path):
+    """
+    The gate mirrors each predictor's own sampler (exists and getsize > 0), which raises
+    "Missing or empty ... land-cover raster" on exactly that condition. It is NOT the
+    > 100 bytes the exposure GeoJSON uses -- these are rasters.
+    """
+    root = _fake_root(tmp_path)
+    target = _landcover_path("Assam", root)
+    assert pas.missing_landcover("Assam", root) == [(pas.LANDCOVER_FEATURE, target)]
+    _write(target, b"")
+    assert pas.missing_landcover("Assam", root) == [(pas.LANDCOVER_FEATURE, target)]
+    _write(target, b"\x00")                   # one byte is enough, as for terrain
+    assert pas.missing_landcover("Assam", root) == []
+
+
+def test_land_cover_joins_the_states_missing_set(monkeypatch, tmp_path):
+    """A present terrain set is no longer "nothing missing" while land cover is absent."""
+    root, pilots, _store = _wire(monkeypatch, tmp_path, ["Arunachal Pradesh"])
+    for _feature, path in _paths_for(PREFIXES["Arunachal Pradesh"], root).items():
+        _write(path)
+    assert pilots["Arunachal Pradesh"].missing(root) == []      # terrain reader: happy
+    missing = pas.artifact_wiring("Arunachal Pradesh")["missing"](root)
+    assert missing == [(pas.LANDCOVER_FEATURE,
+                        _landcover_path("Arunachal Pradesh", root))]
+
+
+def test_land_cover_is_verified_and_placed_at_the_canonical_path(monkeypatch, tmp_path):
+    """Requirement 11: manifest inclusion, size+SHA-256 verification, correct placement."""
+    root, _pilots, store = _wire(monkeypatch, tmp_path, ["Meghalaya"])
+    filename = _landcover_filename("Meghalaya")
+    entry = store.manifest()["artifacts"][filename]
+    body = store.payloads[filename]
+    assert entry == {"bytes": len(body),
+                     "sha256": hashlib.sha256(body).hexdigest()}
+
+    report = _run(root, ["Meghalaya"], store)
+    target = _landcover_path("Meghalaya", root)
+    assert report["results"][0]["status"] == "prepared"
+    assert pas.LANDCOVER_FEATURE in report["results"][0]["downloaded"]
+    with open(target, "rb") as handle:
+        assert handle.read() == body
+    assert store.gets.count("%s/%s" % (BASE, filename)) == 1
+    assert [p for p in _all_files(root) if p.endswith(".part")] == []
+    assert pas.missing_landcover("Meghalaya", root) == []
+    # No alias: each predictor reads exactly one land-cover path.
+    assert pas.artifact_wiring("Meghalaya")["aliases"](root).get(
+        pas.LANDCOVER_FEATURE) is None
+
+
+@pytest.mark.parametrize("mode,reason", [("truncate", "size mismatch"),
+                                         ("corrupt", "sha256 mismatch")])
+def test_an_unverifiable_land_cover_raster_is_never_promoted(monkeypatch, tmp_path,
+                                                             mode, reason):
+    """
+    No fabrication: a truncated or corrupted land-cover body must leave the canonical
+    path ABSENT, so the predictor keeps raising PredictionUnavailable instead of sampling
+    a half-written raster.
+    """
+    root, _pilots, store = _wire(monkeypatch, tmp_path, ["Assam"])
+    filename = _landcover_filename("Assam")
+    if mode == "truncate":
+        store.truncate = {filename: 16}
+    else:
+        store.corrupt = {filename}
+    report = _run(root, ["Assam"], store)
+    target = _landcover_path("Assam", root)
+    assert not os.path.exists(target)
+    assert report["results"][0]["status"] == "incomplete"
+    assert reason in report["results"][0]["error"]
+    assert (pas.LANDCOVER_FEATURE, target) in \
+        pas.artifact_wiring("Assam")["missing"](root)
+    assert [p for p in _all_files(root) if p.endswith(".part")] == []
+    # The terrain half still landed: one bad object does not hold the state hostage.
+    assert sorted(report["results"][0]["downloaded"]) == sorted(FEATURES)
+
+
+def test_no_manifest_entry_for_land_cover_reports_incomplete_honestly(monkeypatch,
+                                                                     tmp_path):
+    """Until the object is uploaded the state must say "incomplete" with the real reason."""
+    root, _pilots, store = _wire(monkeypatch, tmp_path, ["Assam"])
+    filename = _landcover_filename("Assam")
+    del store.payloads[filename]        # absent from the manifest AND from storage
+    report = _run(root, ["Assam"], store)
+    result = report["results"][0]
+    assert result["status"] == "incomplete"
+    assert "%s: no verifiable manifest entry" % filename in result["error"]
+    assert not any(url.endswith(filename) for url in store.gets)
+    assert not os.path.exists(_landcover_path("Assam", root))
+    assert sorted(result["downloaded"]) == sorted(FEATURES)
+
+
+def test_land_cover_needs_no_artifact_specific_download_code(tmp_path):
+    """
+    Requirements 10 and 12: the 512 MB land-cover raster is memory-safe because
+    _fetch_one is artifact-agnostic -- bounded blocks, an in-flight digest and os.replace,
+    with no branch on which artifact is moving. A land-cover special case in the download
+    path would be exactly the regression that could reintroduce a whole-body read.
+    """
+    source = _read_source("app", "services", "pilot_artifact_store.py")
+    body = _function_source(source, "_fetch_one")
+    for token in ("land_cover", "landcover", "LANDCOVER"):
+        assert token not in body
+    for forbidden in (".content", ".text", "read()"):
+        assert forbidden not in body
+    assert "os.replace" in body
+    # The chunk size is a constant, not a function of artifact size. (Whole-body reads are
+    # policed across the whole module by test_no_whole_body_read_survives_in_the_source;
+    # this fetcher's docstring names them explicitly, so only the mechanism is asserted
+    # here.)
+    fetcher = _function_source(source, "_default_fetcher")
+    assert "iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES)" in fetcher
+
+
+def test_the_capacity_default_covers_the_full_four_state_plan():
+    """
+    3600 MB, raised from 2600 when the three land-cover rasters joined the set: the cold
+    -start plan is ~3286 MB, and at 2600 the gate would have refused the ENTIRE run --
+    including the terrain rasters that already work. The runtime override is unchanged.
+    """
+    assert pas.DEFAULT_MAX_TOTAL_MB == 3600
+    assert pas.max_total_mb({}) == 3600
+    assert pas.max_total_mb({"SIH_PILOT_ARTIFACT_MAX_TOTAL_MB": "2600"}) == 2600
+    # Headroom over the real plan, so a cold start is not refused before it begins.
+    assert pas.DEFAULT_MAX_TOTAL_MB > 3286

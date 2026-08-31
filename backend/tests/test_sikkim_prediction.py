@@ -502,3 +502,60 @@ def test_legacy_provider_without_provenance_still_reports_cleanly():
     for key in sp._RAINFALL_PROVENANCE_KEYS:
         assert key not in report, key
     assert report["note"] == sp._LEGACY_RAINFALL_NOTE
+
+
+# ---------------------------------------------------------------------------
+# generated_from must name the series that was ACTUALLY used
+#
+# The four pilot services used to hard-code "real IMERG antecedent rainfall" in
+# their top-level `generated_from`, which was false on any run that fell back to
+# the Open-Meteo ERA5 archive. rainfall_source_label() derives that clause from
+# the rainfall report instead.
+# ---------------------------------------------------------------------------
+def test_source_label_names_imerg_only_for_a_real_imerg_series():
+    label = sp.rainfall_source_label({
+        "source": "IMERG_Early", "source_kind": "IMERG",
+        "is_fallback": False, "data_quality_status": "REAL",
+    })
+    assert label == "real IMERG_Early antecedent rainfall"
+
+
+def test_source_label_marks_a_fallback_and_never_says_real_imerg():
+    label = sp.rainfall_source_label({
+        "source": "Open-Meteo ERA5 archive (FALLBACK)",
+        "source_kind": "OPEN_METEO_FALLBACK",
+        "is_fallback": True, "data_quality_status": "FALLBACK",
+    })
+    assert "FALLBACK" in label
+    assert "Open-Meteo ERA5" in label
+    assert "NOT an official live IMERG observation" in label
+    assert "real IMERG" not in label
+
+
+def test_source_label_reports_an_unknown_source_kind_without_promoting_it():
+    label = sp.rainfall_source_label({
+        "source": "Some Other Gauge Network", "source_kind": "GAUGE",
+        "is_fallback": False, "data_quality_status": "REAL",
+    })
+    assert "Some Other Gauge Network" in label
+    assert "real IMERG" not in label
+
+
+def test_source_label_refuses_to_invent_provenance():
+    for missing in (None, {}, {"source_kind": None, "source": None}, 7, "IMERG"):
+        label = sp.rainfall_source_label(missing)
+        assert label == "antecedent rainfall of UNREPORTED provenance", missing
+
+
+def test_generated_from_follows_the_series_actually_used():
+    real = sp.rainfall_source_label({"source": "IMERG_Early",
+                                     "source_kind": "IMERG",
+                                     "is_fallback": False})
+    fallback = sp.rainfall_source_label({"source": "Open-Meteo ERA5 archive (FALLBACK)",
+                                        "source_kind": "OPEN_METEO_FALLBACK",
+                                        "is_fallback": True,
+                                        "data_quality_status": "FALLBACK"})
+    assert real != fallback
+    template = "persisted LightGBM (static_plus_rainfall, 11 features) + %s"
+    assert "real IMERG_Early" in template % real
+    assert "real IMERG" not in template % fallback

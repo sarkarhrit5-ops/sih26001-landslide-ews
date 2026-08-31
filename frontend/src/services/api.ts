@@ -8,6 +8,12 @@
  * rather than substituting placeholder data.
  */
 
+// Endpoint construction for the four pilot consoles lives in ONE pure module so
+// the paths are unit-testable without a browser. The reverse edge is type-only
+// (pilotMapCells imports only `import type` from here), so there is no runtime
+// import cycle.
+import { pilotGridEndpoint, pilotMapEndpoint } from '../components/pilot/pilotMapCells';
+
 export type WarningLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
 export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -387,6 +393,153 @@ export type MeghalayaEventsResponse = SikkimEventsResponse;
 export type MeghalayaPredictionResponse = SikkimPredictionResponse;
 export type MeghalayaPredictionCell = SikkimPredictionCell;
 
+/* ------------------------------------------------------------------------- *
+ * Lightweight pilot MAP view: GET /api/v1/predict/<state>/map
+ *
+ * A pure projection of the SAME grid prediction (backend
+ * app/services/pilot_map_view.py), shaped as a GeoJSON FeatureCollection so raw
+ * Leaflet can consume it directly. It carries one Point feature per grid cell at
+ * the cell CENTER with only five properties; the per-cell 11-feature vectors,
+ * cell bboxes and per-cell reasons are deliberately omitted and remain available
+ * on /predict/<state>/grid.
+ *
+ * Two consequences the consoles must respect:
+ *   * `bbox` is gone, so a cell rectangle is reconstructed from the copied
+ *     `grid.cell_height_deg` / `grid.cell_width_deg` around the feature's center
+ *     (see components/pilot/pilotMapCells.ts). Nothing is guessed.
+ *   * `disclosures` is NOT in this payload; it stays on /grid, which the consoles
+ *     fetch lazily only when an operator opens the audit panel.
+ * ------------------------------------------------------------------------- */
+
+/** Route token used by the pilot endpoints (NOT always the backend state_id). */
+export type PilotStateKey = 'sikkim' | 'assam' | 'arunachal' | 'meghalaya';
+
+/** rainfall_service quality vocabulary, reported verbatim. */
+export type RainfallQualityStatus = 'REAL' | 'FALLBACK' | 'UNAVAILABLE';
+/** rainfall_service source_kind vocabulary, reported verbatim. */
+export type RainfallSourceKind = 'IMERG' | 'OPEN_METEO_FALLBACK';
+
+/**
+ * Cache/observation-age block from rainfall_service. Every field is optional
+ * because a legacy or injected provider may not supply it; absence must render as
+ * "not reported", never as a fabricated zero.
+ */
+export interface RainfallFreshness {
+  cache_hit?: boolean | null;
+  age_seconds?: number | null;
+  ttl_seconds?: number | null;
+  expires_in_seconds?: number | null;
+  observation_lag_days?: number | null;
+  probe_days_walked?: number | null;
+  probe_first_offset?: number | null;
+  probe_reach?: string | null;
+  probe_mode?: string | null;
+}
+
+export interface RainfallCoverage {
+  state?: string | null;
+  aoi_uniform?: boolean | null;
+  window_days?: number | null;
+  window_semantics?: string | null;
+}
+
+/**
+ * The O(1) rainfall provenance subset copied into the map document
+ * (pilot_map_view.RAINFALL_VIEW_KEYS). The heavy `daily_series_mm` and the five
+ * rainfall model features are NOT here — they are not rewritten, just dropped.
+ * `null` for the whole block means the producer reported no rainfall metadata at
+ * all, which must be surfaced as unreported provenance.
+ */
+export interface PilotMapRainfallView {
+  source?: string | null;
+  source_kind?: RainfallSourceKind | string | null;
+  run_type?: string | null;
+  is_fallback?: boolean | null;
+  data_quality_status?: RainfallQualityStatus | string | null;
+  units?: string | null;
+  requested_date?: string | null;
+  rainfall_observation_date?: string | null;
+  fetched_at_utc?: string | null;
+  freshness?: RainfallFreshness | null;
+  window_days?: number | null;
+  aoi_uniform?: boolean | null;
+  note?: string | null;
+  caveats?: string[] | null;
+  coverage?: RainfallCoverage | null;
+}
+
+/**
+ * The route-level normalised provenance block (routes._rainfall_provenance).
+ * Present only when the producer supplied rainfall metadata; `fallback_warning`
+ * appears verbatim whenever is_fallback is true.
+ */
+export interface RainfallProvenanceBlock {
+  source?: string | null;
+  source_kind?: RainfallSourceKind | string | null;
+  is_fallback?: boolean | null;
+  data_quality_status?: RainfallQualityStatus | string | null;
+  requested_date?: string | null;
+  rainfall_observation_date?: string | null;
+  fetched_at_utc?: string | null;
+  freshness?: RainfallFreshness | null;
+  units?: string | null;
+  fallback_warning?: string;
+  caveats?: string[];
+}
+
+/**
+ * Exactly the five properties pilot_map_view emits per cell. An UNAVAILABLE cell
+ * is PRESENT with probability/risk_class/exceeds_decision_threshold all null —
+ * it must stay visible on the map rather than be dropped and read as safe.
+ */
+export interface PilotMapCellProperties {
+  cell_id: string | null;
+  status: 'OK' | 'UNAVAILABLE' | string | null;
+  probability: number | null;
+  risk_class: WarningLevel | null;
+  exceeds_decision_threshold: boolean | null;
+}
+
+/** GeoJSON Point at the cell center. Coordinates are [lon, lat] (not Leaflet order). */
+export interface PilotMapFeature {
+  type: 'Feature';
+  id?: string | null;
+  geometry: {
+    type: 'Point';
+    coordinates: [number, number];
+  };
+  properties: PilotMapCellProperties;
+}
+
+/** Self-describing metadata about what this projection kept and dropped. */
+export interface PilotMapViewMeta {
+  kind: string;
+  geometry: string;
+  cell_property_keys: string[];
+  omitted_cell_keys: string[];
+  full_response_endpoint_note?: string;
+  note?: string;
+}
+
+/** GET /api/v1/predict/<state>/map */
+export interface PilotMapResponse {
+  type: 'FeatureCollection';
+  state: string | null;
+  pilot_area: string | null;
+  target_date: string | null;
+  /** Derived from the rainfall series actually used — never a hard-coded IMERG claim. */
+  generated_from: string | null;
+  decision_threshold: number | null;
+  aoi: AoiBounds | null;
+  /** Copied verbatim; cell_height_deg / cell_width_deg let the map rebuild rectangles. */
+  grid: SikkimPredictionGrid | null;
+  rainfall: PilotMapRainfallView | null;
+  summary: SikkimPredictionSummary | null;
+  view: PilotMapViewMeta;
+  rainfall_provenance?: RainfallProvenanceBlock;
+  features: PilotMapFeature[];
+}
+
 class ApiService {
   private async fetchJson<T>(endpoint: string): Promise<T> {
     try {
@@ -591,6 +744,48 @@ class ApiService {
     return this.fetchJson<MeghalayaPredictionResponse>(
       `/api/v1/predict/meghalaya/grid${query ? `?${query}` : ''}`,
     );
+  }
+
+  /**
+   * COMPACT map payload for any of the four pilot consoles: the same prediction
+   * as /predict/<state>/grid, projected to a GeoJSON FeatureCollection of
+   * cell-centre Points with five properties each. This is what the consoles use
+   * to draw their maps.
+   *
+   * The endpoint is selected from the pilot registry by `state`, so there is one
+   * code path for all four states and an unknown key throws instead of silently
+   * resolving to another state's data. ONE request draws the whole grid — there
+   * is no per-cell request anywhere in this layer.
+   *
+   * Throws when the backend refuses (HTTP 503 DATA_UNAVAILABLE, e.g. a missing
+   * land-cover raster or model artifact) rather than returning fabricated risk
+   * zones; the caller must render an explicit unavailable state carrying the
+   * backend's own reason.
+   *
+   * @param state pilot route token: 'sikkim' | 'assam' | 'arunachal' | 'meghalaya'
+   * @param date optional 'YYYY-MM-DD' prediction date (default: backend uses today, UTC)
+   * @param step optional grid cell size in degrees (default: backend coarse grid)
+   */
+  async getPilotMap(
+    state: PilotStateKey,
+    date?: string,
+    step?: number,
+  ): Promise<PilotMapResponse> {
+    return this.fetchJson<PilotMapResponse>(pilotMapEndpoint(state, { date, step }));
+  }
+
+  /**
+   * FULL grid response for a pilot, including the per-cell 11-feature vectors and
+   * the `disclosures` list. Deliberately NOT used to draw the map: the consoles
+   * call this only when an operator opens "Audit this prediction", so the initial
+   * map load issues no /grid request.
+   */
+  async getPilotGrid(
+    state: PilotStateKey,
+    date?: string,
+    step?: number,
+  ): Promise<SikkimPredictionResponse> {
+    return this.fetchJson<SikkimPredictionResponse>(pilotGridEndpoint(state, { date, step }));
   }
 }
 

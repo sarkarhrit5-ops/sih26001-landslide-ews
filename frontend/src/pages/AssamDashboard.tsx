@@ -15,7 +15,7 @@
  * Structurally this is the Sikkim console adapted to the Assam endpoints, whose JSON
  * shapes are identical. SikkimDashboard is left untouched.
  */
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode, type SyntheticEvent } from 'react';
 import {
   ArrowLeft,
   RefreshCw,
@@ -39,12 +39,15 @@ import {
 import { BrandLockup } from '../components/brand/BrandMark';
 import { Eyebrow, StatusPill, ProvenanceTag, cn } from '../components/common/ui';
 import { DataStateBanner } from '../components/common/DataStateBanner';
+import { RainfallProvenanceBanner } from '../components/common/RainfallProvenanceBanner';
 import { AssamMap } from '../components/assam/AssamMap';
+import { toPilotMapCells } from '../components/pilot/pilotMapCells';
 import { apiService } from '../services/api';
 import type {
   AssamEvidenceResponse,
   AssamEventsResponse,
   AssamPredictionResponse,
+  PilotMapResponse,
   ValidationMetricSet,
 } from '../services/api';
 
@@ -404,11 +407,14 @@ interface AssamDashboardProps {
 export function AssamDashboard({ onBack }: AssamDashboardProps) {
   const [evidence, setEvidence] = useState<AssamEvidenceResponse | null>(null);
   const [events, setEvents] = useState<AssamEventsResponse | null>(null);
-  const [prediction, setPrediction] = useState<AssamPredictionResponse | null>(null);
+  const [prediction, setPrediction] = useState<PilotMapResponse | null>(null);
   const [evidenceState, setEvidenceState] = useState<LoadState>('loading');
   const [eventsState, setEventsState] = useState<LoadState>('loading');
   const [predictionState, setPredictionState] = useState<LoadState>('loading');
   const [predictionReason, setPredictionReason] = useState<string | null>(null);
+  const [audit, setAudit] = useState<AssamPredictionResponse | null>(null);
+  const [auditState, setAuditState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [auditReason, setAuditReason] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
@@ -417,6 +423,10 @@ export function AssamDashboard({ onBack }: AssamDashboardProps) {
     setEventsState('loading');
     setPredictionState('loading');
     setPredictionReason(null);
+    // A new load invalidates any previously fetched audit payload.
+    setAudit(null);
+    setAuditState('idle');
+    setAuditReason(null);
     apiService
       .getAssamEvidence()
       .then((d) => {
@@ -433,12 +443,12 @@ export function AssamDashboard({ onBack }: AssamDashboardProps) {
         setEventsState('ready');
       })
       .catch(() => alive && setEventsState('error'));
-    // Real per-cell prediction: the persisted Assam model over the AOI grid with real
-    // ESA WorldCover land cover and real IMERG antecedent rainfall. On refusal
-    // (HTTP 503) we keep the reason and show no zones rather than substituting
-    // fabricated risk.
+    // Real per-cell prediction, taken from the compact /predict/assam/map projection:
+    // one request for the whole grid, no per-cell request, and no /grid fetch on
+    // initial load. On refusal (HTTP 503) we keep the backend's own reason and show
+    // no zones rather than substituting fabricated risk.
     apiService
-      .getAssamPrediction()
+      .getPilotMap('assam')
       .then((d) => {
         if (!alive) return;
         setPrediction(d);
@@ -459,8 +469,29 @@ export function AssamDashboard({ onBack }: AssamDashboardProps) {
   const vm = metrics?.validation_metrics ?? null;
   const decision = metrics?.model_decision ?? null;
   const eventList = useMemo(() => events?.events ?? [], [events]);
-  const predictedCells = useMemo(() => prediction?.cells ?? [], [prediction]);
+  const predictedCells = useMemo(() => toPilotMapCells(prediction), [prediction]);
   const loading = evidenceState === 'loading';
+
+  /**
+   * "Audit this prediction" disclosure. The compact /map projection deliberately
+   * omits the per-cell feature vectors and the honesty disclosures, so those are
+   * fetched from /predict/assam/grid the first time an operator opens the panel —
+   * never on initial map load, and never more than once per reload.
+   */
+  const handleAuditToggle = (event: SyntheticEvent<HTMLDetailsElement>) => {
+    if (!event.currentTarget.open || auditState !== 'idle') return;
+    setAuditState('loading');
+    apiService
+      .getPilotGrid('assam')
+      .then((d) => {
+        setAudit(d);
+        setAuditState('ready');
+      })
+      .catch((err) => {
+        setAuditReason(extractUnavailableReason(err));
+        setAuditState('error');
+      });
+  };
 
   const statusOk = evidence?.status === 'VALID';
 
@@ -600,7 +631,7 @@ export function AssamDashboard({ onBack }: AssamDashboardProps) {
                 events ? (
                   <span className="font-mono text-[11px] text-slate-400">
                     {events.count} events
-                    {predictionState === 'ready' && prediction
+                    {predictionState === 'ready' && prediction?.summary
                       ? ` · ${prediction.summary.cells_scored} cells scored`
                       : ''}
                   </span>
@@ -643,16 +674,17 @@ export function AssamDashboard({ onBack }: AssamDashboardProps) {
               )
             )}
 
-            {/* Predicted risk zones — the persisted Assam model over the AOI grid with
-                real ESA WorldCover land cover and real IMERG antecedent rainfall. The
-                banner is conditional on the actual prediction outcome, so the page
-                never claims a prediction when the backend refused, nor implies safety
-                for cells that were left unscored. */}
+            {/* Predicted risk zones — the persisted Assam model over the AOI grid,
+                drawn from the compact /predict/assam/map projection. Rainfall wording
+                is no longer an unconditional "real IMERG" claim, and the failure text
+                is the backend's own reason rather than a guess about which input was
+                missing, so the page never claims a prediction when the backend
+                refused, nor implies safety for cells left unscored. */}
             <div className="mt-4 space-y-3">
               {predictionState === 'loading' && (
                 <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 p-3 font-mono text-[11px] text-slate-400">
                   <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-                  Running the Assam model over the AOI grid with real land cover and IMERG antecedent rainfall…
+                  Running the Assam model over the AOI grid…
                 </div>
               )}
 
@@ -662,7 +694,7 @@ export function AssamDashboard({ onBack }: AssamDashboardProps) {
                   message={
                     (predictionReason
                       ? `Predicted risk zones unavailable — ${predictionReason}`
-                      : 'Predicted risk zones unavailable — the backend refused with DATA_UNAVAILABLE (the persisted model artifacts, the ESA WorldCover land cover, or the real IMERG rainfall could not be obtained).') +
+                      : 'Predicted risk zones unavailable — the backend refused the request and reported no machine-readable reason.') +
                     ' No zones are drawn rather than substituting fabricated risk.'
                   }
                 />
@@ -670,56 +702,74 @@ export function AssamDashboard({ onBack }: AssamDashboardProps) {
 
               {predictionState === 'ready' && prediction && (
                 <>
-                  {/* Rainfall provenance for THIS prediction (real IMERG, antecedent). */}
-                  <div className="flex items-start gap-2.5 rounded-lg border border-emerald-800/70 bg-emerald-950/40 p-3 text-[11px] leading-relaxed text-emerald-200/90">
-                    <CloudRain className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-                    <div>
-                      <span className="font-semibold text-emerald-200">Real IMERG antecedent rainfall.</span>{' '}
-                      {prediction.rainfall.source ?? 'IMERG'} ·{' '}
-                      {prediction.rainfall.window_days}-day AOI-mean window
-                      {prediction.rainfall.run_type ? ` (${prediction.rainfall.run_type} run)` : ''}
-                      {'. '}
-                      {prediction.rainfall.note}
-                    </div>
-                  </div>
+                  {/* Rainfall provenance for THIS prediction, exactly as reported. */}
+                  <RainfallProvenanceBanner
+                    rainfall={prediction.rainfall}
+                    provenance={prediction.rainfall_provenance}
+                    footnote={prediction.generated_from ?? undefined}
+                  />
 
                   {/* Prediction summary over the scored grid. */}
-                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-                    <MiniStat v={prediction.summary.cells_scored} l="cells scored" />
-                    <MiniStat
-                      v={prediction.summary.cells_exceeding_threshold}
-                      l="≥ threshold"
-                      accentAmber
-                    />
-                    <MiniStat
-                      v={
-                        prediction.summary.max_probability != null
-                          ? Math.round(prediction.summary.max_probability * 100)
-                          : undefined
-                      }
-                      l="max prob"
-                      suffix="%"
-                    />
-                    <MiniStat v={prediction.summary.cells_unavailable} l="unavailable" />
-                  </div>
+                  {prediction.summary && (
+                    <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                      <MiniStat v={prediction.summary.cells_scored} l="cells scored" />
+                      <MiniStat
+                        v={prediction.summary.cells_exceeding_threshold}
+                        l="≥ threshold"
+                        accentAmber
+                      />
+                      <MiniStat
+                        v={
+                          prediction.summary.max_probability != null
+                            ? Math.round(prediction.summary.max_probability * 100)
+                            : undefined
+                        }
+                        l="max prob"
+                        suffix="%"
+                      />
+                      <MiniStat v={prediction.summary.cells_unavailable} l="unavailable" />
+                    </div>
+                  )}
 
-                  {/* Honesty disclosures, served verbatim by the backend. */}
-                  <details className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+                  {/* Honesty disclosures, served verbatim by the backend. The compact
+                      /map payload omits them, so they are fetched from /grid only when
+                      this panel is opened. */}
+                  <details
+                    className="rounded-lg border border-slate-800 bg-slate-900/40 p-3"
+                    onToggle={handleAuditToggle}
+                  >
                     <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-wider text-slate-400">
-                      Prediction disclosures ({prediction.disclosures.length}) · raw probability, not the fused /risk score
+                      Audit this prediction · raw probability, not the fused /risk score
                     </summary>
-                    <ul className="mt-2 space-y-1.5">
-                      {prediction.disclosures.map((d, i) => (
-                        <li key={i} className="flex gap-2 text-[11px] leading-relaxed text-slate-400">
-                          <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-slate-600" />
-                          {d}
-                        </li>
-                      ))}
-                    </ul>
-                    <p className="mt-2 font-mono text-[10px] leading-relaxed text-slate-500">
-                      prediction date {prediction.target_date} · grid {prediction.grid.n_lat}×
-                      {prediction.grid.n_lon} @ {prediction.grid.step_deg}° · source: {prediction.generated_from}
-                    </p>
+                    {auditState === 'loading' && (
+                      <p className="mt-2 flex items-center gap-2 font-mono text-[10px] text-slate-500">
+                        <LoaderCircle className="h-3 w-3 animate-spin" />
+                        Fetching the full per-cell audit payload…
+                      </p>
+                    )}
+                    {auditState === 'error' && (
+                      <p className="mt-2 font-mono text-[10px] leading-relaxed text-amber-300">
+                        Audit payload unavailable
+                        {auditReason ? ` — ${auditReason}` : ' — the backend reported no machine-readable reason'}
+                        . The zones above remain exactly as the map endpoint returned them.
+                      </p>
+                    )}
+                    {auditState === 'ready' && audit && (
+                      <>
+                        <ul className="mt-2 space-y-1.5">
+                          {audit.disclosures.map((d, i) => (
+                            <li key={i} className="flex gap-2 text-[11px] leading-relaxed text-slate-400">
+                              <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-slate-600" />
+                              {d}
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="mt-2 font-mono text-[10px] leading-relaxed text-slate-500">
+                          prediction date {audit.target_date} · grid {audit.grid.n_lat}×
+                          {audit.grid.n_lon} @ {audit.grid.step_deg}° · source: {audit.generated_from}
+                        </p>
+                      </>
+                    )}
                   </details>
                 </>
               )}

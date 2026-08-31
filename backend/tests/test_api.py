@@ -741,3 +741,236 @@ def test_get_current_risk_accepts_an_optional_state_parameter():
     # /risk/forecast keeps its original signature.
     assert list(inspect.signature(routes.get_forecast_risk).parameters) == ["lat", "lon"]
 
+
+# ---------------------------------------------------------------------------
+# /predict/<state>/map -- the lightweight map projection
+#
+# These endpoints must cost EXACTLY what the matching /grid endpoint costs: one
+# prediction call, transformed. They must not change, shadow or duplicate /grid.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+
+from app.services import pilot_map_view  # noqa: E402
+
+PILOT_MAP_ENDPOINTS = [
+    ("sikkim", sikkim_prediction, "predict_sikkim_grid",
+     routes.predict_sikkim_map, routes.predict_sikkim_grid),
+    ("assam", assam_prediction, "predict_assam_grid",
+     routes.predict_assam_map, routes.predict_assam_grid),
+    ("arunachal", arunachal_prediction, "predict_arunachal_grid",
+     routes.predict_arunachal_map, routes.predict_arunachal_grid),
+    ("meghalaya", meghalaya_prediction, "predict_meghalaya_grid",
+     routes.predict_meghalaya_map, routes.predict_meghalaya_grid),
+]
+
+
+def _map_prediction_payload(rainfall, n_cells=12):
+    """A prediction with real cells, unlike the empty-cell provenance fixture."""
+    cells = []
+    for i in range(n_cells):
+        lat, lon = 27.0 + 0.1 * i, 88.0 + 0.1 * i
+        unavailable = (i % 4 == 3)
+        cell = {
+            "cell_id": "r%02dc%02d" % (i // 4, i % 4),
+            "row": i // 4,
+            "col": i % 4,
+            "latitude": lat,
+            "longitude": lon,
+            "bbox": {"min_lat": lat, "max_lat": lat + 0.1,
+                     "min_lon": lon, "max_lon": lon + 0.1},
+            "status": "UNAVAILABLE" if unavailable else "OK",
+            "susceptibility_probability": None if unavailable else 0.0725 * (i + 1),
+            "risk_class": None if unavailable else "MODERATE",
+            "exceeds_decision_threshold": None if unavailable else False,
+            "features": None if unavailable else {
+                "elevation": 1483.2734375, "slope": 24.117645263671875,
+                "aspect": 181.40626525878906, "curvature": 0.011342163197696209,
+                "twi": 6.204118728637695, "land_cover_class": 2,
+                "rain_1d_mm": 1.5399999618530273, "rain_3d_mm": 4.610000133514404,
+                "rain_7d_mm": 10.520000457763672, "rain_14d_mm": 21.049999237060547,
+                "api_mm": 7.032187461853027,
+            },
+            "reasons": ["terrain sample is nodata"] if unavailable else [],
+        }
+        cells.append(cell)
+    payload = _prediction_payload(rainfall)
+    payload.update({
+        "pilot_area": "fixture pilot AOI",
+        "generated_from": "persisted LightGBM (11 features) + fixture rainfall",
+        "aoi": {"min_lat": 27.0, "max_lat": 28.1, "min_lon": 88.0, "max_lon": 88.9},
+        "grid": {"step_deg": 0.1, "rows": 3, "cols": 4, "cells": n_cells},
+        "decision_threshold": 0.4315,
+        "summary": {
+            "cells_total": n_cells,
+            "cells_scored": n_cells - n_cells // 4,
+            "cells_unavailable": n_cells // 4,
+            "risk_class_counts": {"MODERATE": n_cells - n_cells // 4},
+            "cells_exceeding_threshold": 0,
+            "max_probability": 0.87,
+            "mean_probability": 0.41,
+        },
+        "cells": cells,
+    })
+    return payload
+
+
+def _counting_canned(module, attr, monkeypatch, payload):
+    """Patch the service's predict function and count how often it runs."""
+    calls = []
+
+    def _fake(*args, **kwargs):
+        calls.append((args, kwargs))
+        return json.loads(json.dumps(payload))  # a fresh copy each call
+
+    monkeypatch.setattr(module, attr, _fake)
+    return calls
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_runs_the_prediction_exactly_once(name, module, attr, map_route,
+                                                      grid_route, monkeypatch):
+    calls = _counting_canned(module, attr, monkeypatch,
+                             _map_prediction_payload(_REAL_RAINFALL_REPORT))
+    body = map_route()
+    assert len(calls) == 1, "%s ran the prediction %d times" % (name, len(calls))
+    assert body["type"] == "FeatureCollection"
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_field_contract(name, module, attr, map_route, grid_route,
+                                    monkeypatch):
+    _counting_canned(module, attr, monkeypatch,
+                     _map_prediction_payload(_REAL_RAINFALL_REPORT))
+    body = map_route()
+    # Top level: exactly the documented keys, plus the route-added provenance block.
+    assert set(body) == set(pilot_map_view.TOP_LEVEL_KEYS) | {"rainfall_provenance"}
+    assert len(body["features"]) == 12
+    for feature in body["features"]:
+        assert set(feature) == {"type", "id", "geometry", "properties"}
+        assert set(feature["properties"]) == set(pilot_map_view.CELL_PROPERTY_KEYS)
+        lon, lat = feature["geometry"]["coordinates"]
+        assert lon > lat, "%s: GeoJSON coordinates must be [lon, lat]" % name
+    # The audit-grade members stay on /grid only.
+    blob = json.dumps(body["features"])
+    for omitted in ("features", "bbox", "reasons", "row", "col", "twi"):
+        assert omitted not in blob, "%s leaked %r" % (name, omitted)
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_is_materially_smaller_than_grid(name, module, attr, map_route,
+                                                     grid_route, monkeypatch):
+    _counting_canned(module, attr, monkeypatch,
+                     _map_prediction_payload(_REAL_RAINFALL_REPORT, n_cells=60))
+    map_bytes = len(json.dumps(map_route()))
+    grid_bytes = len(json.dumps(grid_route()))
+    assert map_bytes < 0.5 * grid_bytes, (
+        "%s: map %d bytes vs grid %d bytes" % (name, map_bytes, grid_bytes)
+    )
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_keeps_unavailable_cells_visible(name, module, attr, map_route,
+                                                     grid_route, monkeypatch):
+    _counting_canned(module, attr, monkeypatch,
+                     _map_prediction_payload(_REAL_RAINFALL_REPORT))
+    body = map_route()
+    unavailable = [f for f in body["features"]
+                   if f["properties"]["status"] == "UNAVAILABLE"]
+    assert len(unavailable) == 3, "%s dropped unavailable cells" % name
+    for feature in unavailable:
+        assert feature["properties"]["probability"] is None
+        assert feature["properties"]["risk_class"] is None
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_labels_a_fallback_series(name, module, attr, map_route,
+                                              grid_route, monkeypatch):
+    _counting_canned(module, attr, monkeypatch,
+                     _map_prediction_payload(_FALLBACK_RAINFALL_REPORT))
+    body = map_route()
+    assert body["rainfall"]["is_fallback"] is True
+    assert body["rainfall"]["data_quality_status"] == "FALLBACK"
+    assert "FALLBACK" in body["rainfall_provenance"]["fallback_warning"]
+    assert "daily_series_mm" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_refusal_matches_the_grid_endpoint(name, module, attr, map_route,
+                                                       grid_route, monkeypatch):
+    def boom(*a, **k):
+        raise module.PredictionUnavailable(
+            "real antecedent rainfall could not be obtained",
+            details={"source": "IMERG"},
+        )
+
+    monkeypatch.setattr(module, attr, boom)
+    with pytest.raises(HTTPException) as excinfo:
+        map_route()
+    assert excinfo.value.status_code == DATA_UNAVAILABLE_STATUS_CODE
+    assert excinfo.value.detail["status"] == "DATA_UNAVAILABLE"
+    assert "susceptibility_probability" not in str(excinfo.value.detail)
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_rejects_a_bad_date_with_400(name, module, attr, map_route,
+                                                 grid_route, monkeypatch):
+    def must_not_run(*a, **k):
+        raise AssertionError("%s must not predict for an invalid date" % name)
+
+    monkeypatch.setattr(module, attr, must_not_run)
+    with pytest.raises(HTTPException) as excinfo:
+        map_route(date="30-08-2026")
+    assert excinfo.value.status_code == 400
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_map_endpoint_passes_step_and_run_type_straight_through(name, module, attr,
+                                                               map_route, grid_route,
+                                                               monkeypatch):
+    calls = _counting_canned(module, attr, monkeypatch,
+                             _map_prediction_payload(_REAL_RAINFALL_REPORT))
+    map_route(date="2025-09-19", step=0.05, run_type="Late")
+    (args, kwargs) = calls[0]
+    assert args[0].strftime("%Y-%m-%d") == "2025-09-19"
+    assert kwargs["step_deg"] == 0.05
+    assert kwargs["run_type"] == "Late"
+
+
+@pytest.mark.parametrize("name,module,attr,map_route,grid_route", PILOT_MAP_ENDPOINTS)
+def test_grid_endpoint_contract_is_untouched(name, module, attr, map_route, grid_route,
+                                            monkeypatch):
+    """Adding /map must not change one byte of the /grid response."""
+    payload = _map_prediction_payload(_REAL_RAINFALL_REPORT)
+    _counting_canned(module, attr, monkeypatch, payload)
+    body = grid_route()
+    for key in payload:
+        assert body[key] == payload[key], "%s /grid altered %r" % (name, key)
+    assert set(body) - set(payload) == {"rainfall_provenance"}
+    assert body["cells"][0]["features"]["twi"] == 6.204118728637695
+    assert "bbox" in body["cells"][0]
+
+
+def test_the_four_map_routes_are_registered_and_distinct_from_grid():
+    """
+    On a real FastAPI the four /map paths must be mounted alongside the four
+    /grid paths (so they show up in /docs) and must not replace them.
+
+    Offline, `fastapi` is a stub whose router decorator does not retain the path,
+    so there is nothing to introspect; the assertion then falls back to the thing
+    that IS observable -- four distinct map handlers next to four distinct grid
+    handlers. It never silently passes on no evidence.
+    """
+    paths = {r.path for r in app.routes if hasattr(r, "path")}
+    if paths:
+        for state in ("sikkim", "assam", "arunachal", "meghalaya"):
+            assert "/api/v1/predict/%s/map" % state in paths
+            assert "/api/v1/predict/%s/grid" % state in paths
+        return
+    map_handlers = [row[3] for row in PILOT_MAP_ENDPOINTS]
+    grid_handlers = [row[4] for row in PILOT_MAP_ENDPOINTS]
+    assert len({id(h) for h in map_handlers}) == 4
+    assert len({id(h) for h in grid_handlers}) == 4
+    assert not ({id(h) for h in map_handlers} & {id(h) for h in grid_handlers})
+    for handler in map_handlers + grid_handlers:
+        assert callable(handler)
+

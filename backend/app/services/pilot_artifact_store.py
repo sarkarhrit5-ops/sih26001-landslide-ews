@@ -52,6 +52,33 @@ ONE NON-RASTER ARTIFACT: MEGHALAYA'S OSM EXPOSURE GEOJSON
     Only Meghalaya is wired this way (OSM_ARTIFACT_STATES); the other three states'
     exposure files already exist, and their terrain wiring is untouched.
 
+THREE LAND-COVER RASTERS: THE WORLDCOVER PILOTS
+    Terrain and exposure are still not the whole set. Assam, Arunachal Pradesh and
+    Meghalaya each score their grid with a REAL ESA WorldCover land_cover_class, read
+    from one more .gitignored raster:
+
+        data/raw/assam_pilot_landcover.tif
+        data/raw/arunachal_pilot_landcover.tif
+        data/raw/meghalaya_pilot_landcover.tif
+
+    Each is produced on the host by scripts/prepare_<state>_landcover.py and is absent
+    from a fresh deployment, so /predict/<state>/map and /predict/<state>/grid refuse
+    with PredictionUnavailable("Missing or empty ... land-cover raster") even once all
+    five terrain rasters are in place. They are the last remaining deployment blocker,
+    so they join the manifest -- three more objects, 1086 MB, delivered through the
+    identical streamed / SHA-256-verified / ".part"-then-os.replace path. Nothing about
+    that path is raster-specific, so no new download code exists for them.
+
+    SIKKIM IS DELIBERATELY EXCLUDED. Sikkim's land_cover_class is derived from elevation
+    inside its own prediction path; it opens no land-cover raster and its model was
+    trained without one. Publishing a Sikkim WorldCover object would create a dependency
+    that does not exist and could not be satisfied honestly. LANDCOVER_ARTIFACT_STATES
+    therefore names exactly the three pilots.
+
+    The size gate is getsize > 0, mirroring each predictor's own check, and there are no
+    aliases: unlike the OSM GeoJSON, each predictor reads its land cover from exactly one
+    path.
+
 SIKKIM HAS TWO NAME FAMILIES FOR THE SAME FIVE RASTERS
     Sikkim was originally excluded here because its DEM was believed to be committed.
     It is not: `git ls-files '*.tif'` is empty, so a fresh deployment has no Sikkim
@@ -111,7 +138,7 @@ IDEMPOTENCE
     before the manifest is even fetched: zero network I/O. With a cache directory, a
     cached file that still matches the manifest is re-linked without re-downloading.
 
-MEMORY (the instance has 512 MB; the dataset is 2.2 GB)
+MEMORY (the instance has 512 MB; the dataset is 3.2 GB)
     Nothing is ever held whole. Response bodies are consumed with iter_content in
     DOWNLOAD_CHUNK_BYTES blocks written straight to the ".part" file, with the SHA-256 and
     the byte count accumulated in flight -- so verification needs no second pass over the
@@ -119,7 +146,9 @@ MEMORY (the instance has 512 MB; the dataset is 2.2 GB)
     are fsync'd and dropped from the page cache every FLUSH_EVERY_BYTES, because dirty
     page cache counts against a container memory limit even when process RSS is flat. The
     manifest is a small JSON document and is refused past MAX_MANIFEST_BYTES rather than
-    accumulated. No raster is opened -- rasterio is never imported here.
+    accumulated. No raster is opened -- rasterio is never imported here. That holds for
+    the 512 MB land-cover raster exactly as for the 184 MB terrain ones: peak memory is a
+    function of DOWNLOAD_CHUNK_BYTES, not of artifact size.
 
 ENVIRONMENT (all configuration, no code changes needed to deploy)
     SIH_PILOT_ARTIFACT_BASE_URL   master switch. Unset/blank => mechanism disabled.
@@ -137,7 +166,8 @@ ENVIRONMENT (all configuration, no code changes needed to deploy)
     SIH_PILOT_ARTIFACT_TIMEOUT    per-request timeout in seconds. Default 120.
     SIH_PILOT_ARTIFACT_MAX_TOTAL_MB
                                   refuse a run whose planned bytes exceed this, and
-                                  refuse when free disk is short. Default 2600.
+                                  refuse when free disk is short. Default 3600 (the full
+                                  four-state plan is ~3286 MB with land cover included).
 
 LOGGING HYGIENE
     Object URLs are logged at DEBUG only. INFO/WARNING/ERROR mention filenames, so a
@@ -185,18 +215,43 @@ OSM_ARTIFACT_STATES = ("Meghalaya",)
 # This is a mirror of an existing threshold, never a change to one.
 OSM_MIN_BYTES = 100
 
+# --- WorldCover land cover (see "THREE LAND-COVER RASTERS" in the module docstring) ---
+LANDCOVER_FEATURE = "land_cover"
+# ONLY the three WorldCover pilots. Sikkim is deliberately ABSENT: its land_cover_class
+# is derived from elevation inside its own prediction path, it opens no land-cover
+# raster, and adding it here would invent a dependency its model was never trained with.
+LANDCOVER_ARTIFACT_STATES = ("Assam", "Arunachal Pradesh", "Meghalaya")
+# The prediction module that OWNS each pilot's land-cover filename, and the path function
+# to read it from. Deliberately a reference to the reader's own function rather than a
+# copy of the filename: the object this module downloads cannot drift from the file the
+# predictor opens. Imported lazily (see _landcover_path_function) so this module keeps
+# importing with no heavy dependencies.
+_LANDCOVER_PATH_FUNCTIONS = {
+    "Assam": ("app.services.assam_prediction", "assam_landcover_raster_path"),
+    "Arunachal Pradesh": ("app.services.arunachal_prediction",
+                          "arunachal_landcover_raster_path"),
+    "Meghalaya": ("app.services.meghalaya_prediction", "meghalaya_landcover_raster_path"),
+}
+
 # The name the publisher (scripts/publish_pilot_artifacts.py) actually writes and that
 # was uploaded alongside the rasters. A bare "manifest.json" default made a fresh
 # deployment request an object that does not exist in the store, so every artifact was
 # refused with manifest_unavailable. Overridable via SIH_PILOT_ARTIFACT_MANIFEST.
 DEFAULT_MANIFEST_NAME = "pilot_manifest.json"
 DEFAULT_TIMEOUT_SECONDS = 120.0
-DEFAULT_MAX_TOTAL_MB = 2600
+# Refuse a run whose planned bytes exceed this (and whose free disk is short) -- see
+# _capacity_problem. Raised from 2600 to 3600 when the three WorldCover land-cover
+# rasters joined the publish set: the full four-state cold-start plan is now ~3286 MB,
+# and at 2600 the gate would have refused the ENTIRE run, including the terrain rasters
+# that work today. The value is a guard against a runaway plan, not a disk reservation;
+# SIH_PILOT_ARTIFACT_MAX_TOTAL_MB still overrides it at runtime, and the free-disk half
+# of the check is what actually protects a small volume.
+DEFAULT_MAX_TOTAL_MB = 3600
 # Streamed in fixed-size blocks so peak memory is independent of artifact size. Small on
-# purpose: the instance this runs on has 512 MB, and the largest raster is 184 MB.
+# purpose: the instance this runs on has 512 MB, and the largest artifact is 512 MB.
 DOWNLOAD_CHUNK_BYTES = 256 * 1024
 # Written bytes are flushed and dropped from the page cache this often. Dirty page cache
-# counts against a container memory limit, so streaming 2.2 GB without this can walk the
+# counts against a container memory limit, so streaming 3.2 GB without this can walk the
 # cgroup into an OOM kill even while the process itself holds one small buffer.
 FLUSH_EVERY_BYTES = 8 * 1024 * 1024
 # The manifest is a small JSON document; anything larger is not ours and is refused
@@ -484,13 +539,91 @@ def _with_osm_exposure(state_name, wiring):
     return {"paths": _paths, "missing": _missing, "aliases": _aliases}
 
 
+def _landcover_path_function(state_name):
+    """
+    The prediction module's OWN <state>_landcover_raster_path function.
+
+    Lazily imported: pilot prediction modules pull in heavier machinery, and this module
+    must keep importing cleanly with nothing but the standard library. Raises KeyError for
+    a state that has no land-cover artifact (Sikkim, notably).
+    """
+    module_path, function_name = _LANDCOVER_PATH_FUNCTIONS[state_name]
+    import importlib
+    return getattr(importlib.import_module(module_path), function_name)
+
+
+def landcover_artifact_paths(state_name, data_dir=None):
+    """
+    {LANDCOVER_FEATURE: <root>/raw/<state>_pilot_landcover.tif} -- the exact path the
+    state's own predictor opens when it samples WorldCover land cover.
+
+    The path comes from the predictor's path function, not from a filename spelled out
+    here, so the download target and the read target cannot diverge. When data_dir is
+    None the reader's own default root is used, exactly as the predictor would.
+    """
+    path_function = _landcover_path_function(state_name)
+    if data_dir is None:
+        return {LANDCOVER_FEATURE: path_function()}
+    return {LANDCOVER_FEATURE: path_function(data_dir)}
+
+
+def missing_landcover(state_name, data_dir=None):
+    """[(feature, path)] when the land-cover raster is absent or empty.
+
+    getsize(path) > 0 -- a mirror of the gate inside each predictor's own sampler, which
+    raises PredictionUnavailable("Missing or empty ... land-cover raster") on exactly
+    that condition. Not the > 100 the exposure GeoJSON uses; these are rasters.
+    """
+    return [(feature, path)
+            for feature, path in sorted(landcover_artifact_paths(state_name,
+                                                                 data_dir).items())
+            if not (os.path.exists(path) and os.path.getsize(path) > 0)]
+
+
+def _with_landcover(state_name, wiring):
+    """
+    Add a state's WorldCover land-cover raster to its existing wiring.
+
+    Composition, exactly like _with_osm_exposure: the wiring it is handed is called
+    through untouched and its results merged, so the five terrain rasters (and, for
+    Meghalaya, the OSM GeoJSON) behave byte-identically to before. Sikkim never reaches
+    here.
+
+    NO ALIASES. Unlike the exposure GeoJSON, which has a second cache path
+    get_osm_assets consults, each predictor reads its land cover from exactly one path,
+    so placing the verified bytes there is sufficient.
+
+    Same honest consequence as the OSM case: once land cover is part of a state's
+    `missing`, a run that places all five rasters but cannot verify the land cover
+    reports "incomplete" rather than "prepared". Land cover really is still missing --
+    grid prediction for that state would still refuse -- so that is the truthful verdict,
+    not a regression. It does not touch _assam_dem_available / _arunachal_dem_available /
+    _meghalaya_dem_available, which read missing_<state>_terrain_rasters() directly and
+    are unchanged.
+    """
+    base_paths = wiring["paths"]
+    base_missing = wiring["missing"]
+    base_aliases = wiring["aliases"]
+
+    def _paths(data_dir=None):
+        merged = dict(base_paths(data_dir))
+        merged.update(landcover_artifact_paths(state_name, data_dir))
+        return merged
+
+    def _missing(data_dir=None):
+        return list(base_missing(data_dir)) + missing_landcover(state_name, data_dir)
+
+    return {"paths": _paths, "missing": _missing, "aliases": base_aliases}
+
+
 def artifact_wiring(state_name):
     """
     {"paths", "missing", "aliases"} for one state.
 
     The three pilots delegate to their own prediction module (so the files written are
     exactly the files read); Sikkim uses the local wiring above. States in
-    OSM_ARTIFACT_STATES additionally carry their OSM exposure GeoJSON. Raises KeyError
+    OSM_ARTIFACT_STATES additionally carry their OSM exposure GeoJSON, and states in
+    LANDCOVER_ARTIFACT_STATES their WorldCover land-cover raster. Raises KeyError
     for an unknown state.
     """
     if state_name == SIKKIM_STATE_NAME:
@@ -501,6 +634,8 @@ def artifact_wiring(state_name):
                   "aliases": lambda data_dir=None: {}}
     if state_name in OSM_ARTIFACT_STATES:
         wiring = _with_osm_exposure(state_name, wiring)
+    if state_name in LANDCOVER_ARTIFACT_STATES:
+        wiring = _with_landcover(state_name, wiring)
     return wiring
 
 
@@ -600,12 +735,13 @@ def _default_fetcher(url, dest_path, timeout):
 
     Peak RSS is ONE DOWNLOAD_CHUNK_BYTES buffer regardless of artifact size. No whole-file
     bytes object exists anywhere on this path -- response.content, response.text or an
-    unbounded read() would each materialise up to 184 MB, which a 512 MB instance cannot
-    afford on top of the loaded application.
+    unbounded read() would each materialise up to 512 MB (the largest artifact is
+    arunachal_pilot_landcover.tif), which a 512 MB instance cannot afford on top of the
+    loaded application.
 
     The digest is computed from the chunks in flight, so the finished artifact never has
     to be read back a second time merely to hash it, and each block is flushed and
-    released from the page cache so the cgroup's memory total stays flat across 2.2 GB.
+    released from the page cache so the cgroup's memory total stays flat across 3.2 GB.
     """
     import requests
     digest = hashlib.sha256()
@@ -783,7 +919,8 @@ def pilot_artifact_plan(data_dir=None, states=PILOT_ARTIFACT_STATES):
     """
     Read-only: what each state is missing, per its OWN availability predicate (the
     prediction module's missing_<state>_terrain_rasters, plus the exposure gate for
-    states in OSM_ARTIFACT_STATES).
+    states in OSM_ARTIFACT_STATES and the land-cover gate for states in
+    LANDCOVER_ARTIFACT_STATES).
 
     Returns [{state, missing: [(feature, path)], dem_missing, error}]. Opens no raster
     and touches no network, so it is safe on every startup.
@@ -814,7 +951,8 @@ def _fetch_one(base_url, cache_dir, final_path, entry, fetcher, timeout, aliases
     apply (getsize > 0 for a raster, > OSM_MIN_BYTES for an exposure GeoJSON).
 
     Nothing here is raster-specific: size and SHA-256 come from the manifest entry, so
-    Meghalaya's OSM GeoJSON travels this exact path.
+    Meghalaya's OSM GeoJSON and the three WorldCover land-cover rasters travel this exact
+    path with no artifact-specific code.
 
     aliases are ADDITIONAL canonical paths that must resolve to the same verified bytes
     (Sikkim's serving-name twins; Meghalaya's OSM cache twin). They are linked only
@@ -931,9 +1069,10 @@ def _summarize(results, disabled=False, reason=None):
 def ensure_pilot_artifacts(data_dir=None, states=None, env=None,
                            fetcher=None, manifest_loader=None):
     """
-    Download the missing pilot artifacts -- the terrain rasters, plus Meghalaya's OSM
-    exposure GeoJSON -- from object storage. Idempotent, honest, and never raises: a
-    deployment must come up even when storage is unreachable.
+    Download the missing pilot artifacts -- the terrain rasters, the three WorldCover
+    land-cover rasters, plus Meghalaya's OSM exposure GeoJSON -- from object storage.
+    Idempotent, honest, and never raises: a deployment must come up even when storage is
+    unreachable.
 
     Returns a report dict (see _summarize). fetcher/manifest_loader are injectable so
     the whole decision path is testable with no network and no storage credentials

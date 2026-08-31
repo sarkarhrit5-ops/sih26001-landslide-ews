@@ -454,8 +454,8 @@ def predict_arunachal_grid(target_date, step_deg=DEFAULT_STEP_DEG, run_type="Ear
         "pilot_area": PILOT_AREA,
         "generated_from": (
             "persisted Arunachal Pradesh LightGBM (static_plus_rainfall, 11 features; "
-            "land cover scored as a categorical) + real ESA WorldCover land cover + "
-            "real IMERG antecedent rainfall"
+            "land cover scored as a categorical) + real ESA WorldCover land cover + %s"
+            % sp.rainfall_source_label(rainfall)
         ),
         "target_date": target_date.strftime("%Y-%m-%d"),
         "aoi": bounds,

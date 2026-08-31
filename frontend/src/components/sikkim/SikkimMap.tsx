@@ -7,29 +7,37 @@
  * predicted cells are coloured by the model's warning class and rendered only for
  * cells the backend actually scored (UNAVAILABLE cells are drawn as hollow, never
  * as a fabricated low-risk zone).
+ *
+ * Cells now arrive from the compact /predict/sikkim/map projection, already parsed
+ * by the shared pure helpers in ../pilot/pilotMapCells. That payload omits the
+ * per-cell bbox, so each rectangle is reconstructed from the grid's own
+ * cell_height_deg / cell_width_deg around the cell centre the model was sampled
+ * at; when the grid reports no usable cell size, no rectangle is drawn rather than
+ * an assumed extent. The palette, legend behaviour and AOI styling are unchanged.
  */
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import type { LandslideEvent, SikkimPredictionCell } from '../../services/api';
-import { EAST_SIKKIM_PILOT_AOI } from '../../data/nerStates';
+import type { LandslideEvent } from '../../services/api';
+import { getPilotConfig } from '../../data/nerStates';
+import {
+  RISK_FILL,
+  RISK_ORDER,
+  hasUnavailableCells,
+  riskFill,
+  scoredRiskClasses,
+} from '../pilot/pilotMapCells';
+import type { PilotMapCell } from '../pilot/pilotMapCells';
 
 interface SikkimMapProps {
   events: LandslideEvent[];
   /** null while loading; empty array only after a successful empty response. */
   loaded: boolean;
-  /** Predicted grid cells; omitted/empty when no prediction is available. */
-  predictedCells?: SikkimPredictionCell[];
+  /** Predicted cells from /predict/sikkim/map; omitted/empty when no prediction is available. */
+  predictedCells?: PilotMapCell[];
 }
 
-/** Fill colour per model warning class (matches the app's risk palette). */
-const RISK_FILL: Record<string, string> = {
-  LOW: '#22c55e',
-  MEDIUM: '#eab308',
-  HIGH: '#f97316',
-  EXTREME: '#ef4444',
-};
-
-const AOI = EAST_SIKKIM_PILOT_AOI;
+const PILOT = getPilotConfig('sikkim');
+const AOI = PILOT.aoi;
 const AOI_CENTER: [number, number] = [(AOI.minLat + AOI.maxLat) / 2, (AOI.minLon + AOI.maxLon) / 2];
 
 export function SikkimMap({ events, loaded, predictedCells }: SikkimMapProps) {
@@ -50,7 +58,7 @@ export function SikkimMap({ events, loaded, predictedCells }: SikkimMapProps) {
       subdomains: 'abcd',
     }).addTo(map);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
-    map.setView(AOI_CENTER, 9);
+    map.setView(AOI_CENTER, PILOT.zoom);
     mapRef.current = map;
     layerRef.current = L.layerGroup().addTo(map);
     return () => {
@@ -73,30 +81,31 @@ export function SikkimMap({ events, loaded, predictedCells }: SikkimMapProps) {
         [AOI.maxLat, AOI.maxLon],
       ],
       { color: '#22d3ee', weight: 1.5, dashArray: '5,4', fill: true, fillColor: '#22d3ee', fillOpacity: 0.04, opacity: 0.9 },
-    ).bindTooltip('East Sikkim pilot AOI — modelled extent', { direction: 'top', opacity: 0.95 });
+    ).bindTooltip(PILOT.aoiTooltip, { direction: 'top', opacity: 0.95 });
     aoiRect.addTo(layer);
 
     // Predicted susceptibility zones (drawn under the GLC points). Only cells the
     // backend actually scored get a filled colour; UNAVAILABLE cells are drawn as
     // a faint hollow outline so the gap is visible rather than implied safe.
     (predictedCells ?? []).forEach((cell) => {
-      const b = cell.bbox;
-      if (cell.status === 'OK' && cell.risk_class && cell.susceptibility_probability != null) {
-        const fill = RISK_FILL[cell.risk_class] ?? '#64748b';
-        const rect = L.rectangle(
-          [
-            [b.min_lat, b.min_lon],
-            [b.max_lat, b.max_lon],
-          ],
-          { color: fill, weight: 0.5, opacity: 0.35, fill: true, fillColor: fill, fillOpacity: 0.32 },
-        );
-        const prob = (cell.susceptibility_probability * 100).toFixed(1);
+      if (!cell.bounds) return;
+      if (cell.scored && cell.riskClass && cell.probability != null) {
+        const fill = riskFill(cell.riskClass);
+        const rect = L.rectangle(cell.bounds, {
+          color: fill,
+          weight: 0.5,
+          opacity: 0.35,
+          fill: true,
+          fillColor: fill,
+          fillOpacity: 0.32,
+        });
+        const prob = (cell.probability * 100).toFixed(1);
         const parts = [
           `<div style="font-family:ui-monospace,monospace;font-size:11px;color:#e2e8f0;">`,
-          `<div style="font-weight:700;color:${fill};text-transform:uppercase;letter-spacing:0.5px;">${cell.risk_class}</div>`,
+          `<div style="font-weight:700;color:${fill};text-transform:uppercase;letter-spacing:0.5px;">${cell.riskClass}</div>`,
           `<div style="margin-top:2px;">susceptibility ${prob}%</div>`,
-          `<div style="margin-top:2px;color:#94a3b8;">${cell.latitude.toFixed(3)}, ${cell.longitude.toFixed(3)}</div>`,
-          cell.exceeds_decision_threshold
+          `<div style="margin-top:2px;color:#94a3b8;">${cell.lat.toFixed(3)}, ${cell.lon.toFixed(3)}</div>`,
+          cell.exceedsDecisionThreshold
             ? `<div style="margin-top:2px;color:${fill};">≥ decision threshold</div>`
             : '',
           `</div>`,
@@ -104,14 +113,14 @@ export function SikkimMap({ events, loaded, predictedCells }: SikkimMapProps) {
         rect.bindPopup(parts.join(''));
         rect.addTo(layer);
       } else {
-        const rect = L.rectangle(
-          [
-            [b.min_lat, b.min_lon],
-            [b.max_lat, b.max_lon],
-          ],
-          { color: '#475569', weight: 0.4, opacity: 0.25, fill: false, dashArray: '2,3' },
-        );
-        rect.bindTooltip('No prediction (terrain unavailable at this cell)', { direction: 'top', opacity: 0.9 });
+        const rect = L.rectangle(cell.bounds, {
+          color: '#475569',
+          weight: 0.4,
+          opacity: 0.25,
+          fill: false,
+          dashArray: '2,3',
+        });
+        rect.bindTooltip(PILOT.unavailableCellTooltip, { direction: 'top', opacity: 0.9 });
         rect.addTo(layer);
       }
     });
@@ -154,13 +163,9 @@ export function SikkimMap({ events, loaded, predictedCells }: SikkimMapProps) {
 
   // Only advertise the predicted-risk swatches when the backend actually scored
   // at least one cell, so the legend never implies a prediction we don't have.
-  const scoredClasses = new Set(
-    (predictedCells ?? [])
-      .filter((c) => c.status === 'OK' && c.risk_class)
-      .map((c) => c.risk_class as string),
-  );
-  const hasUnavailable = (predictedCells ?? []).some((c) => c.status !== 'OK');
-  const RISK_ORDER: Array<'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME'> = ['LOW', 'MEDIUM', 'HIGH', 'EXTREME'];
+  const cells = predictedCells ?? [];
+  const scoredClasses = scoredRiskClasses(cells);
+  const hasUnavailable = hasUnavailableCells(cells);
 
   return (
     <div className="relative h-full w-full min-h-[440px] overflow-hidden rounded-xl border border-slate-800 bg-[#0b0f17]">
